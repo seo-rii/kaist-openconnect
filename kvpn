@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""kvpn — headless connect to the KAIST VPN (Ivanti Connect Secure + AirCUVE 2Auth).
+
+Does the whole login in the terminal — id/password, SMS or Email code entry —
+then brings the tunnel up via openconnect. No browser required.
+
+Flow (reverse-engineered from the live service):
+  1. GET  kvpn.kaist.ac.kr/            -> Ivanti sign-in session (DSSIGNIN)
+  2. GET  portal /view/redirectVPN     -> portal session (JSESSIONID) + correlation code
+  3. GET  portal /view/onepassCheck    -> (-> /vpnInit) set OTP context
+  4. POST portal /api/portal           -> send SMS/Email code
+  5. POST portal /j_spring_security_check.do -> verify code (-> OAuth)
+  6. GET  portal /vpn/<client_id>?code -> read `message` = the password#2 token
+  7. POST login.cgi (user+pass+realm+password#2) -> DSID
+  8. sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr
+
+Requires: python3 (stdlib only) and openconnect on PATH.
+"""
+import sys
+import os
+import re
+import ssl
+import time
+import getpass
+import shutil
+import subprocess
+import http.cookiejar
+import urllib.request
+import urllib.parse
+
+# ---- deployment constants (from ags_frame.js / captured traffic) ----
+IVANTI = "https://kvpn.kaist.ac.kr"
+PORTAL = "https://kvpnportal.kaist.ac.kr:8443"
+CLIENT_ID = "rmwb8juiS8oJ5XVK"
+APP_NAME = "vpn2auth"
+REALMS = ["KAIST Members", "Visitors", "Graduates"]
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+class KvpnError(Exception):
+    """A user-facing failure with a clear message."""
+
+
+# --------------------------------------------------------------------------
+# HTTP plumbing
+# --------------------------------------------------------------------------
+def new_session():
+    """Return (opener, cookiejar) with its own cookie store."""
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cj),
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+    )
+    opener.addheaders = [("User-Agent", UA)]
+    return opener, cj
+
+
+def http_get(opener, url, referer=None):
+    req = urllib.request.Request(url)
+    if referer:
+        req.add_header("Referer", referer)
+    with opener.open(req, timeout=30) as r:
+        return r.geturl(), r.read().decode("utf-8", "replace")
+
+
+def http_post(opener, url, data, referer=None):
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=body)
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    if referer:
+        req.add_header("Referer", referer)
+    with opener.open(req, timeout=30) as r:
+        return r.geturl(), r.read().decode("utf-8", "replace")
+
+
+def cookie_value(cj, name):
+    for c in cj:
+        if c.name == name:
+            return c.value
+    return None
+
+
+class _NoAutoRedirect(urllib.request.HTTPErrorProcessor):
+    """Return 3xx/4xx responses instead of raising or auto-following them,
+    so a redirect chain can be walked by hand (cookies still update)."""
+    def http_response(self, request, response):
+        return response
+    https_response = http_response
+
+
+# --------------------------------------------------------------------------
+# Ivanti side
+# --------------------------------------------------------------------------
+class Ivanti:
+    def __init__(self):
+        self.opener, self.cj = new_session()
+        self.welcome_url = None
+        self.login_url = None
+
+    def begin(self):
+        """Step 1: land on the sign-in page, capture the login endpoint."""
+        url, html = http_get(self.opener, IVANTI + "/")
+        self.welcome_url = url
+        m = re.search(r'action="([^"]*login\.cgi)"', html)
+        if not m:
+            m = re.search(r'(/dana-na/auth/url_[^/"\']+/login\.cgi)', html)
+        if not m:
+            raise KvpnError("Could not find the Ivanti login form. Is the gateway reachable?")
+        self.login_url = urllib.parse.urljoin(url, m.group(1))
+        return self.welcome_url
+
+    def finish(self, username, password, realm, password2):
+        """Step 7: submit primary + secondary credentials, return the DSID."""
+        final_url, _ = http_post(self.opener, self.login_url, {
+            "tz_offset": "540",
+            "username": username,
+            "password": password,
+            "realm": realm,
+            "password#2": password2,
+        }, referer=self.welcome_url)
+        if "p=failed" in final_url or "p=locked" in final_url:
+            raise KvpnError("Ivanti rejected the final login (bad password, or the "
+                            "sign-in session expired while entering the code).")
+        dsid = cookie_value(self.cj, "DSID")
+        if not dsid:
+            raise KvpnError("Login did not yield a DSID cookie (unexpected server response "
+                            "at %s)." % final_url)
+        return dsid
+
+
+# --------------------------------------------------------------------------
+# AirCUVE 2Auth portal side
+# --------------------------------------------------------------------------
+class Portal:
+    def __init__(self, parent_url):
+        self.opener, self.cj = new_session()
+        # second opener over the SAME jar that does not auto-follow redirects
+        self.raw = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cj),
+            urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+            _NoAutoRedirect,
+        )
+        self.raw.addheaders = [("User-Agent", UA)]
+        self.parent = parent_url
+
+    def _raw(self, method, url, data=None, referer=None):
+        """Single request, no redirect following. Returns (status, headers, body)."""
+        body = urllib.parse.urlencode(data).encode() if data is not None else None
+        req = urllib.request.Request(url, data=body, method=method)
+        req.add_header("Sec-Fetch-Dest", "iframe")
+        req.add_header("Sec-Fetch-Mode", "navigate")
+        req.add_header("Sec-Fetch-Site", "same-origin")
+        if data is not None:
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        if referer:
+            req.add_header("Referer", referer)
+        with self.raw.open(req, timeout=30) as r:
+            return r.getcode(), r.headers, r.read().decode("utf-8", "replace")
+
+    def begin(self, username):
+        """Steps 2-3: mint the portal session and set the OTP context."""
+        rv = PORTAL + "/view/redirectVPN?" + urllib.parse.urlencode({
+            "user_name": username,
+            "time": int(time.time() * 1000),
+            "parent": self.parent,
+            "client_id": CLIENT_ID,
+            "app_name": APP_NAME,
+        })
+        _, html = http_get(self.opener, rv, referer=self.parent)
+        m = re.search(r'name=["\']code["\'][^>]*value=[\'"]([^\'"]+)[\'"]', html)
+        if not m:
+            raise KvpnError("Portal did not return a correlation code (is the username "
+                            "registered for 2Auth?).")
+        code = m.group(1)
+        # onepassCheck -> vpnInit: primes the OTP context for this session
+        oc = PORTAL + "/view/onepassCheck?" + urllib.parse.urlencode({
+            "user_name": username, "code": code, "parent": self.parent,
+        })
+        http_get(self.opener, oc, referer=rv)
+        # GET /oauth/authorize (bounces to /request). This registers the OAuth
+        # request as Spring Security's "saved request", so after the OTP login
+        # the portal redirects back into the OAuth flow instead of to "/".
+        authorize = PORTAL + "/oauth/authorize?" + urllib.parse.urlencode({
+            "client_id": CLIENT_ID,
+            "redirect_uri": PORTAL + "/vpn/" + CLIENT_ID,
+            "response_type": "code",
+            "scope": "qr",
+            "app_name": APP_NAME,
+            "user_name": username,
+            "parent": self.parent,
+        })
+        http_get(self.opener, authorize, referer=oc)
+
+    def send_code(self, username, send_type):
+        """Step 4: trigger an SMS or Email one-time code."""
+        http_post(self.opener, PORTAL + "/api/portal", {
+            "cmd": "AuthPortal.twoAuthSend",
+            "send_type": send_type,          # "sms" or "email"
+            "user_name": username,
+        }, referer=self.parent)
+
+    def verify(self, username, otp):
+        """Steps 5-6: verify the code, walk the OAuth chain by hand, return password#2."""
+        debug = os.environ.get("KVPN_DEBUG")
+        mainmenu = PORTAL + "/view/mainMenu"
+
+        status, hdrs, _ = self._raw("POST", PORTAL + "/j_spring_security_check.do", {
+            "j_username": username,
+            "j_password": otp,
+            "otp_flag": "1",
+        }, referer=mainmenu)
+        if debug:
+            print("  [verify] j_spring -> %s %s" % (status, hdrs.get("Location", "")[:90]))
+        if status not in (301, 302, 303, 307, 308):
+            raise KvpnError("Code verification failed (wrong or expired code).")
+
+        # follow the OAuth redirect chain manually to reach the token page
+        loc = urllib.parse.urljoin(PORTAL + "/", hdrs.get("Location"))
+        body = ""
+        for _ in range(6):
+            status, hdrs, body = self._raw("GET", loc, referer=mainmenu)
+            if debug:
+                print("  [verify] hop %s %-70s -> %s" % (status, loc[:70],
+                                                         hdrs.get("Location", "")[:60]))
+            if status in (301, 302, 303, 307, 308):
+                loc = urllib.parse.urljoin(loc, hdrs.get("Location"))
+                continue
+            break
+        if status != 200:
+            raise KvpnError("OAuth token page returned HTTP %s at %s" % (status, loc[:120]))
+
+        m = re.search(r'var\s+message\s*=\s*["\']([^"\']+)["\']', body)
+        if not m:
+            raise KvpnError("Verified OK, but the token (password#2) was not on the OAuth "
+                            "page. Re-run with KVPN_DEBUG=1 and share the hop list.")
+        return m.group(1)
+
+
+# --------------------------------------------------------------------------
+# openconnect
+# --------------------------------------------------------------------------
+def launch_tunnel(dsid):
+    oc = shutil.which("openconnect")
+    if not oc:
+        raise KvpnError("openconnect not found on PATH. Install it (brew install openconnect).")
+    host = IVANTI.split("//", 1)[1]
+    cmd = ["sudo", oc, "--protocol=nc", "--cookie-on-stdin", host]
+    print("\nBringing up the tunnel (sudo will prompt for your Mac password)...")
+    print("  $ sudo openconnect --protocol=nc --cookie-on-stdin %s" % host)
+    # DSID goes in via stdin so it never appears in the process list.
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        proc.stdin.write(("DSID=%s\n" % dsid).encode())
+        proc.stdin.flush()
+        proc.stdin.close()
+        return proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        return proc.wait()
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+def choose(prompt, options, default_index=0):
+    print(prompt)
+    for i, opt in enumerate(options):
+        marker = " (default)" if i == default_index else ""
+        print("  %d) %s%s" % (i + 1, opt, marker))
+    while True:
+        raw = input("Choice [%d]: " % (default_index + 1)).strip()
+        if not raw:
+            return options[default_index]
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        print("  Please enter a number between 1 and %d." % len(options))
+
+
+def main():
+    print("=== KAIST VPN (kvpn) ===")
+    default_user = os.environ.get("KVPN_USER", "")
+    username = input("KAIST ID%s: " % (" [%s]" % default_user if default_user else "")).strip() \
+        or default_user
+    if not username:
+        raise KvpnError("A KAIST ID is required.")
+    password = getpass.getpass("Password: ")
+    if not password:
+        raise KvpnError("A password is required.")
+    realm = choose("Realm:", REALMS, 0)
+
+    ivanti = Ivanti()
+    welcome = ivanti.begin()
+
+    portal = Portal(welcome)
+    portal.begin(username)
+
+    send_type = "sms" if choose("Send code via:", ["SMS", "Email"], 0) == "SMS" else "email"
+    portal.send_code(username, send_type)
+    print("Code sent via %s. It may take up to a minute to arrive." % send_type.upper())
+
+    otp = input("Enter the code: ").strip()
+    if not otp:
+        raise KvpnError("A code is required.")
+
+    password2 = portal.verify(username, otp)
+    dsid = ivanti.finish(username, password, realm, password2)
+    print("Authenticated. DSID acquired.")
+
+    rc = launch_tunnel(dsid)
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KvpnError as e:
+        print("\nError: %s" % e, file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        sys.exit(130)
