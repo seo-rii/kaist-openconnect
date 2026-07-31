@@ -14,12 +14,16 @@ Flow (reverse-engineered from the live service):
   7. POST login.cgi (user+pass+realm+password#2) -> DSID
   8. sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr
 
+Credentials can optionally be stored (password in the macOS Keychain, id/realm
+in ~/.config/kvpn/config.json); `kvpn --forget` removes them again.
+
 Requires: python3 (stdlib only) and openconnect on PATH.
 """
 import sys
 import os
 import re
 import ssl
+import json
 import time
 import getpass
 import shutil
@@ -238,6 +242,136 @@ class Portal:
 
 
 # --------------------------------------------------------------------------
+# credential storage (opt-in)
+# --------------------------------------------------------------------------
+# The KAIST ID and realm live in a 0600 config file; the password goes into
+# the macOS Keychain (service "kvpn"). Off macOS the password falls back into
+# the config file itself, still 0600, with a warning at save time.
+KEYCHAIN_SERVICE = "kvpn"
+
+
+def config_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "kvpn", "config.json")
+
+
+def keychain_available():
+    return sys.platform == "darwin" and shutil.which("security")
+
+
+def _sec_quote(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def keychain_set(username, password):
+    # `security -i` reads the command from stdin, keeping the password out of
+    # the process list.
+    line = "add-generic-password -U -a %s -s %s -w %s\n" % (
+        _sec_quote(username), _sec_quote(KEYCHAIN_SERVICE), _sec_quote(password))
+    r = subprocess.run(["security", "-i"], input=line.encode(),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode != 0:
+        raise KvpnError("Could not write to the Keychain: %s"
+                        % r.stderr.decode("utf-8", "replace").strip())
+
+
+def keychain_get(username):
+    r = subprocess.run(["security", "find-generic-password",
+                        "-a", username, "-s", KEYCHAIN_SERVICE, "-w"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return r.stdout.rstrip("\n")
+
+
+def keychain_delete(username):
+    r = subprocess.run(["security", "delete-generic-password",
+                        "-a", username, "-s", KEYCHAIN_SERVICE],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0
+
+
+def _read_config():
+    try:
+        with open(config_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_config(cfg):
+    path = config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def save_credentials(username, password, realm):
+    """Persist credentials; returns a human description of where they went."""
+    cfg = _read_config()
+    cfg.update({"username": username, "realm": realm})
+    cfg.pop("password", None)
+    where = "config file %s" % config_path()
+    if keychain_available():
+        keychain_set(username, password)
+        where = "macOS Keychain (id/realm in %s)" % config_path()
+    else:
+        cfg["password"] = password
+    _write_config(cfg)
+    return where
+
+
+def load_credentials():
+    """Return (username, password, realm) if stored, else None."""
+    cfg = _read_config()
+    username = cfg.get("username")
+    if not username:
+        return None
+    password = cfg.get("password")
+    if password is None and keychain_available():
+        password = keychain_get(username)
+    if not password:
+        return None
+    realm = cfg.get("realm")
+    if realm not in REALMS:
+        realm = REALMS[0]
+    return username, password, realm
+
+
+def forget_credentials():
+    """Remove everything `save_credentials` wrote. Returns True if any existed."""
+    removed = False
+    username = _read_config().get("username")
+    if username and keychain_available() and keychain_delete(username):
+        print("Removed the Keychain entry for %s." % username)
+        removed = True
+    try:
+        os.remove(config_path())
+        print("Removed %s." % config_path())
+        removed = True
+    except OSError:
+        pass
+    return removed
+
+
+def offer_to_save(username, password, realm):
+    dest = "the macOS Keychain" if keychain_available() else config_path()
+    try:
+        ans = input("Store these credentials in %s for future logins? [y/N]: "
+                    % dest).strip().lower()
+    except EOFError:
+        return
+    if ans in ("y", "yes"):
+        if not keychain_available():
+            print("  Note: no Keychain here; the password is stored in a "
+                  "user-only (0600) file.")
+        where = save_credentials(username, password, realm)
+        print("Stored in the %s. Run `kvpn --forget` to remove." % where)
+
+
+# --------------------------------------------------------------------------
 # openconnect
 # --------------------------------------------------------------------------
 def launch_tunnel(dsid):
@@ -277,17 +411,41 @@ def choose(prompt, options, default_index=0):
         print("  Please enter a number between 1 and %d." % len(options))
 
 
-def main():
+USAGE = """usage: kvpn [--forget]
+
+  (no options)  connect to the KAIST VPN
+  --forget      remove stored credentials (Keychain entry + config file)
+  -h, --help    show this help
+"""
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(USAGE, end="")
+        return
+    if "--forget" in argv or "forget" in argv:
+        if not forget_credentials():
+            print("No stored credentials found.")
+        return
+    if argv:
+        raise KvpnError("Unknown option: %s\n%s" % (" ".join(argv), USAGE))
+
     print("=== KAIST VPN (kvpn) ===")
-    default_user = os.environ.get("KVPN_USER", "")
-    username = input("KAIST ID%s: " % (" [%s]" % default_user if default_user else "")).strip() \
-        or default_user
-    if not username:
-        raise KvpnError("A KAIST ID is required.")
-    password = getpass.getpass("Password: ")
-    if not password:
-        raise KvpnError("A password is required.")
-    realm = choose("Realm:", REALMS, 0)
+    stored = load_credentials()
+    if stored:
+        username, password, realm = stored
+        print("Using stored credentials for %s (%s). Run `kvpn --forget` to remove."
+              % (username, realm))
+    else:
+        default_user = os.environ.get("KVPN_USER", "")
+        username = input("KAIST ID%s: " % (" [%s]" % default_user if default_user else "")).strip() \
+            or default_user
+        if not username:
+            raise KvpnError("A KAIST ID is required.")
+        password = getpass.getpass("Password: ")
+        if not password:
+            raise KvpnError("A password is required.")
+        realm = choose("Realm:", REALMS, 0)
 
     ivanti = Ivanti()
     welcome = ivanti.begin()
@@ -304,8 +462,17 @@ def main():
         raise KvpnError("A code is required.")
 
     password2 = portal.verify(username, otp)
-    dsid = ivanti.finish(username, password, realm, password2)
+    try:
+        dsid = ivanti.finish(username, password, realm, password2)
+    except KvpnError as e:
+        if stored:
+            raise KvpnError("%s\nIf your KAIST password changed, run `kvpn --forget` "
+                            "and log in again." % e)
+        raise
     print("Authenticated. DSID acquired.")
+
+    if not stored:
+        offer_to_save(username, password, realm)
 
     rc = launch_tunnel(dsid)
     sys.exit(rc)
@@ -313,7 +480,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        main(sys.argv[1:])
     except KvpnError as e:
         print("\nError: %s" % e, file=sys.stderr)
         sys.exit(1)

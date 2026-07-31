@@ -25,10 +25,24 @@ Choice [1]:
 Code sent via SMS. It may take up to a minute to arrive.
 Enter the code: 123456
 Authenticated. DSID acquired.
+Store these credentials in the macOS Keychain for future logins? [y/N]: y
+Stored in the macOS Keychain (id/realm in ~/.config/kvpn/config.json). Run `kvpn --forget` to remove.
 
 Bringing up the tunnel (sudo will prompt for your Mac password)...
 ...
 ESP session established with server
+```
+
+With stored credentials, later runs skip straight to the code prompt:
+
+```
+$ ./kvpn
+=== KAIST VPN (kvpn) ===
+Using stored credentials for your_id (KAIST Members). Run `kvpn --forget` to remove.
+Send code via:
+  1) SMS (default)
+  2) Email
+Choice [1]:
 ```
 
 ## Why
@@ -79,6 +93,21 @@ export KVPN_USER=your_id   # add to ~/.zshrc or ~/.bashrc
 Run `./kvpn` and follow the prompts. To disconnect, press **Ctrl-C** in the
 terminal running it — OpenConnect tears down the tunnel and restores your routes.
 
+### Stored credentials
+
+After a successful login, kvpn offers to store your credentials so future runs
+jump straight to the "Send code via" prompt. The password goes into the
+**macOS Keychain** (service `kvpn`); your ID and realm go into
+`~/.config/kvpn/config.json` (user-only, `0600`). On systems without a
+Keychain, the password is kept in that same `0600` file instead (kvpn warns
+you first). A fresh one-time code is still required on every connection.
+
+To remove everything that was stored:
+
+```sh
+./kvpn --forget
+```
+
 Set `KVPN_DEBUG=1` to print the internal HTTP redirect chain (useful if the login
 flow changes and something breaks):
 
@@ -107,8 +136,12 @@ and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
 
 ## Notes & troubleshooting
 
-- **Credentials are never stored.** Your password is read fresh each run via
-  `getpass` and the `DSID` is ephemeral (it dies when you disconnect).
+- **Credential storage is opt-in.** Nothing is saved unless you answer "y" at
+  the store prompt; `kvpn --forget` removes it all. The `DSID` is ephemeral
+  either way (it dies when you disconnect), and a fresh one-time code is
+  required on every connection.
+- **Stored password went stale?** If your KAIST password changes, the final
+  login step will fail — run `kvpn --forget` and log in again.
 - **`sudo` prompt collision:** if `sudo` misbehaves because stdin is piped, run
   `sudo -v` first, then `./kvpn`.
 - **Harmless route warnings:** on connect you may see two lines like
