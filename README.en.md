@@ -10,6 +10,47 @@ It prompts for your ID, password, and one-time code (SMS or email), completes th
 two-factor handshake, and then brings the tunnel up with
 [OpenConnect](https://www.infradead.org/openconnect/).
 
+## Install
+
+Paste this one line into your terminal — it installs everything you need
+(Homebrew on macOS if missing, plus OpenConnect) and links `kvpn` onto your
+`PATH`:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/predict-woo/kaist-openconnect/main/install.sh)"
+```
+
+Then just run `kvpn`. It skips anything already installed, so it's safe to
+re-run — re-running also updates kvpn to the latest version. On Linux it uses
+your distribution's package manager (apt/dnf/pacman/zypper) for the
+dependencies.
+
+<details>
+<summary>Manual install (if you'd rather not run the installer)</summary>
+
+Install the [requirements](#requirements) yourself, then:
+
+```sh
+git clone https://github.com/predict-woo/kaist-openconnect.git
+cd kaist-openconnect
+chmod +x kvpn
+./kvpn
+```
+
+Optionally put it on your `PATH`:
+
+```sh
+ln -s "$PWD/kvpn" /usr/local/bin/kvpn
+```
+
+</details>
+
+Set a default ID so you can just press Enter at the prompt:
+
+```sh
+export KVPN_USER=your_id   # add to ~/.zshrc or ~/.bashrc
+```
+
 ![A full kvpn session: ID/password/realm prompts, SMS one-time code, Keychain storage offer, and OpenConnect bringing up the tunnel](docs/screenshot.png)
 
 With stored credentials, later runs skip straight to the code prompt:
@@ -45,46 +86,6 @@ a fresh one-time code on every connection — exactly like the official client.
 
 Developed and tested on macOS. It should work on Linux with OpenConnect's default
 `vpnc-script`; reports welcome.
-
-## Install
-
-Paste this one line into your terminal — it installs everything you need
-(Homebrew on macOS if missing, plus OpenConnect) and links `kvpn` onto your
-`PATH`:
-
-```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/predict-woo/kaist-openconnect/main/install.sh)"
-```
-
-It skips anything already installed, so it's safe to re-run — re-running also
-updates kvpn to the latest version. On Linux it uses your distribution's
-package manager (apt/dnf/pacman/zypper) for the dependencies.
-
-<details>
-<summary>Manual install (if you'd rather not run the installer)</summary>
-
-Install the [requirements](#requirements) yourself, then:
-
-```sh
-git clone https://github.com/predict-woo/kaist-openconnect.git
-cd kaist-openconnect
-chmod +x kvpn
-./kvpn
-```
-
-Optionally put it on your `PATH`:
-
-```sh
-ln -s "$PWD/kvpn" /usr/local/bin/kvpn
-```
-
-</details>
-
-Set a default ID so you can just press Enter at the prompt:
-
-```sh
-export KVPN_USER=your_id   # add to ~/.zshrc or ~/.bashrc
-```
 
 ## Usage
 
