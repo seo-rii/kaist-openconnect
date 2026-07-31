@@ -46,6 +46,22 @@ macOS에서 개발·테스트했습니다. Linux에서도 OpenConnect 기본 `vp
 
 ## 설치
 
+터미널에 아래 한 줄을 붙여넣으면 끝입니다 — Homebrew(macOS, 없을 때만)와
+OpenConnect까지 필요한 것을 전부 설치하고, `kvpn`을 `PATH`에 연결합니다:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/predict-woo/kaist-openconnect/main/install.sh)"
+```
+
+이미 설치된 것은 건너뛰므로 다시 실행해도 안전하며, 다시 실행하면 kvpn이 최신
+버전으로 갱신됩니다. Linux에서는 배포판 패키지 관리자(apt/dnf/pacman/zypper)로
+의존성을 설치합니다.
+
+<details>
+<summary>수동 설치 (설치 스크립트를 쓰고 싶지 않다면)</summary>
+
+[요구 사항](#요구-사항)을 직접 설치한 뒤:
+
 ```sh
 git clone https://github.com/predict-woo/kaist-openconnect.git
 cd kaist-openconnect
@@ -58,6 +74,8 @@ chmod +x kvpn
 ```sh
 ln -s "$PWD/kvpn" /usr/local/bin/kvpn
 ```
+
+</details>
 
 기본 ID를 설정해 두면 프롬프트에서 Enter만 누르면 됩니다:
 

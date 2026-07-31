@@ -48,6 +48,23 @@ Developed and tested on macOS. It should work on Linux with OpenConnect's defaul
 
 ## Install
 
+Paste this one line into your terminal — it installs everything you need
+(Homebrew on macOS if missing, plus OpenConnect) and links `kvpn` onto your
+`PATH`:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/predict-woo/kaist-openconnect/main/install.sh)"
+```
+
+It skips anything already installed, so it's safe to re-run — re-running also
+updates kvpn to the latest version. On Linux it uses your distribution's
+package manager (apt/dnf/pacman/zypper) for the dependencies.
+
+<details>
+<summary>Manual install (if you'd rather not run the installer)</summary>
+
+Install the [requirements](#requirements) yourself, then:
+
 ```sh
 git clone https://github.com/predict-woo/kaist-openconnect.git
 cd kaist-openconnect
@@ -60,6 +77,8 @@ Optionally put it on your `PATH`:
 ```sh
 ln -s "$PWD/kvpn" /usr/local/bin/kvpn
 ```
+
+</details>
 
 Set a default ID so you can just press Enter at the prompt:
 
