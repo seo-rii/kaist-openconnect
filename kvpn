@@ -116,7 +116,7 @@ class Ivanti:
 
     def finish(self, username, password, realm, password2):
         """Step 7: submit primary + secondary credentials, return the DSID."""
-        final_url, _ = http_post(self.opener, self.login_url, {
+        final_url, body = http_post(self.opener, self.login_url, {
             "tz_offset": "540",
             "username": username,
             "password": password,
@@ -126,11 +126,38 @@ class Ivanti:
         if "p=failed" in final_url or "p=locked" in final_url:
             raise KvpnError("Ivanti rejected the final login (bad password, or the "
                             "sign-in session expired while entering the code).")
+        if "p=user-confirm" in final_url or 'name="frmConfirmation"' in body:
+            # Active-session confirmation page: the account already has a live
+            # session, and the gateway wants a "Continue" click before issuing
+            # a DSID. Submit the confirmation form like the browser would.
+            final_url, body = self._confirm_continue(final_url, body)
         dsid = cookie_value(self.cj, "DSID")
         if not dsid:
             raise KvpnError("Login did not yield a DSID cookie (unexpected server response "
                             "at %s)." % final_url)
         return dsid
+
+    def _confirm_continue(self, page_url, body):
+        """Submit the frmConfirmation page (btnContinue + hidden fields)."""
+        data = {}
+        btn = None
+        for tag in re.findall(r"<input\b[^>]*>", body, re.I):
+            name = re.search(r'name=["\']([^"\']+)["\']', tag, re.I)
+            value = re.search(r'value=["\']([^"\']*)["\']', tag, re.I)
+            typ = re.search(r'type=["\']([^"\']+)["\']', tag, re.I)
+            if not name:
+                continue
+            typ = typ.group(1).lower() if typ else "text"
+            if typ == "hidden":
+                data[name.group(1)] = value.group(1) if value else ""
+            elif typ == "submit" and name.group(1).lower() == "btncontinue":
+                btn = (name.group(1), value.group(1) if value else "Continue")
+        if btn is None:
+            btn = ("btnContinue", "Continue the session")
+        data[btn[0]] = btn[1]
+        if os.environ.get("KVPN_DEBUG"):
+            print("  [confirm] posting %s to login.cgi" % sorted(data))
+        return http_post(self.opener, self.login_url, data, referer=page_url)
 
 
 # --------------------------------------------------------------------------
