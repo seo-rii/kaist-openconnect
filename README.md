@@ -8,30 +8,7 @@ It prompts for your ID, password, and one-time code (SMS or email), completes th
 two-factor handshake, and then brings the tunnel up with
 [OpenConnect](https://www.infradead.org/openconnect/).
 
-```
-$ ./kvpn
-=== KAIST VPN (kvpn) ===
-KAIST ID: your_id
-Password:
-Realm:
-  1) KAIST Members (default)
-  2) Visitors
-  3) Graduates
-Choice [1]:
-Send code via:
-  1) SMS (default)
-  2) Email
-Choice [1]:
-Code sent via SMS. It may take up to a minute to arrive.
-Enter the code: 123456
-Authenticated. DSID acquired.
-Store these credentials in the macOS Keychain for future logins? [y/N]: y
-Stored in the macOS Keychain (id/realm in ~/.config/kvpn/config.json). Run `kvpn --forget` to remove.
-
-Bringing up the tunnel (sudo will prompt for your Mac password)...
-...
-ESP session established with server
-```
+![A full kvpn session: ID/password/realm prompts, SMS one-time code, Keychain storage offer, and OpenConnect bringing up the tunnel](docs/screenshot.png)
 
 With stored credentials, later runs skip straight to the code prompt:
 
