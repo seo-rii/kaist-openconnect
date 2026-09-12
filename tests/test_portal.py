@@ -158,6 +158,8 @@ class PortalTests(unittest.TestCase):
         ), mock.patch.object(kvpn, "Ivanti") as ivanti, mock.patch.object(
             kvpn, "Portal", return_value=self.portal
         ), mock.patch.object(self.portal, "begin"), mock.patch.object(
+            self.portal, "prepare_otp"
+        ), mock.patch.object(
             self.portal, "verify"
         ) as verify, mock.patch.object(
             kvpn, "choose", return_value="Email"
@@ -188,6 +190,8 @@ class PortalTests(unittest.TestCase):
                 ), mock.patch.object(kvpn, "Ivanti"), mock.patch.object(
                     kvpn, "Portal", return_value=self.portal
                 ), mock.patch.object(self.portal, "begin"), mock.patch.object(
+                    self.portal, "prepare_otp"
+                ), mock.patch.object(
                     self.portal, "verify", return_value="test-secondary-token"
                 ) as verify, mock.patch.object(
                     kvpn, "choose", return_value=choice

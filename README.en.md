@@ -162,17 +162,22 @@ and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
 
 1. `GET kvpn.kaist.ac.kr/` — obtain the Ivanti sign-in session.
 2. `GET portal /view/redirectVPN` — mint a portal session and correlation code.
-3. `GET portal /view/onepassCheck` → `/vpnInit` — set the OTP context.
-4. `GET portal /oauth/authorize` — register the OAuth request as Spring Security's
+3. `POST login.cgi` with username, password, realm, and the full handshake as
+   `password#2` — perform primary authentication without requiring a DSID yet.
+4. `GET portal /view/onepassCheck` → `/vpnInit` — pass only the correlation suffix
+   (not the handshake prefix), check primary authentication, and set the OTP context.
+5. `GET portal /oauth/authorize` — register the OAuth request as Spring Security's
    "saved request" so the post-OTP redirect returns to the OAuth flow.
-5. `POST portal /api/portal` (`cmd=AuthPortal.twoAuthSend`) — send the SMS/email code.
-6. `POST portal /j_spring_security_check.do` — verify the code; Spring redirects
+   Reproduce `/request`'s JavaScript-created `POST /view/redirect` and verify that
+   the OTP menu is reached. Invalid-access and expired-session pages stop the flow.
+6. `POST portal /api/portal` (`cmd=AuthPortal.twoAuthSend`) — send the SMS/email code.
+7. `POST portal /j_spring_security_check.do` — verify the code; Spring redirects
    through `/oauth/authorize` → `/vpn/<client_id>?code=…`.
-7. That page exposes a `message` token, which becomes Ivanti's `password#2`.
-8. `POST login.cgi` with username, password, realm, and `password#2` → a `DSID`
+8. That page exposes a `message` token, which becomes Ivanti's `password#2`.
+9. `POST login.cgi` with username, password, realm, and `password#2` → a `DSID`
    session cookie.
-9. `sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr` — the DSID
-   is passed on stdin so it never appears in the process list.
+10. `sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr` — the DSID
+    is passed on stdin so it never appears in the process list.
 
 ## Notes & troubleshooting
 
@@ -182,15 +187,21 @@ and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
   in the [official VPN portal](https://kvpn.kaist.ac.kr/). `Portal accepted` confirms
   request acceptance, not delivery to your inbox. Check the `Error:` message if
   the request fails.
-- **Test coverage:** CI uses simulated portal responses to check accepted and
-  rejected send requests and Email (`otp_flag=2`)/SMS (`otp_flag=1`) verification.
+- **`invalid-access` at `onepassCheck` in the log?** Initialization failed before
+  code delivery. Run the installer again to update. Updated logs show
+  `diagnostics_version: 2`, a `POST login.cgi` before `onepassCheck`, and a
+  `portal-init` event with `phase: "otp-ready"` after the OTP menu is confirmed.
+  If it still fails, collect the new log and the `Error:` message together.
+- **Test coverage:** CI uses simulated portal responses to check initialization
+  ordering and failure handling, accepted and rejected send requests, and
+  Email (`otp_flag=2`)/SMS (`otp_flag=1`) verification.
   It does not test mail delivery or VPN connections with a real KAIST account.
 - **Credential storage is opt-in.** Nothing is saved unless you answer "y" at
   the store prompt; `kvpn --forget` removes it all. The `DSID` is ephemeral
   either way (it dies when you disconnect), and a fresh one-time code is
   required on every connection.
-- **Stored password went stale?** If your KAIST password changes, the final
-  login step will fail — run `kvpn --forget` and log in again.
+- **Stored password went stale?** If your KAIST password changes, initial or final
+  authentication will fail — run `kvpn --forget` and log in again.
 - **Linux/macOS `sudo` prompt collision:** if `sudo` misbehaves because stdin is piped, run
   `sudo -v` first, then `./kvpn`.
 - **OpenConnect not found on Windows:** set `KVPN_OPENCONNECT` to the full path

@@ -7,7 +7,9 @@ then brings the tunnel up via openconnect. No browser required.
 Flow (reverse-engineered from the live service):
   1. GET  kvpn.kaist.ac.kr/            -> Ivanti sign-in session (DSSIGNIN)
   2. GET  portal /view/redirectVPN     -> portal session (JSESSIONID) + correlation code
-  3. GET  portal /view/onepassCheck    -> (-> /vpnInit) set OTP context
+  3. POST login.cgi (user+pass+realm+handshake) -> validate primary credentials
+     GET  portal /view/onepassCheck (code suffix only) -> /vpnInit
+     GET  portal /oauth/authorize -> /request; POST /view/redirect -> OTP menu
   4. POST portal /api/portal           -> send SMS/Email code
   5. POST portal /j_spring_security_check.do -> verify code (-> OAuth)
   6. GET  portal /vpn/<client_id>?code -> read `message` = the password#2 token
@@ -41,6 +43,7 @@ CLIENT_ID = "rmwb8juiS8oJ5XVK"
 APP_NAME = "vpn2auth"
 REALMS = ["KAIST Members", "Visitors", "Graduates"]
 OTP_FLAGS = {"sms": "1", "email": "2"}
+HANDSHAKE_TAG = "Tn2Xf8"  # ags_frame.js: primary-auth message, not an OTP token
 
 
 def platform_user_agent():
@@ -250,13 +253,7 @@ class Ivanti:
 
     def finish(self, username, password, realm, password2):
         """Step 7: submit primary + secondary credentials, return the DSID."""
-        final_url, body = http_post(self.opener, self.login_url, {
-            "tz_offset": "540",
-            "username": username,
-            "password": password,
-            "realm": realm,
-            "password#2": password2,
-        }, referer=self.welcome_url)
+        final_url, body = self._submit_login(username, password, realm, password2)
         if "p=failed" in final_url or "p=locked" in final_url:
             raise KvpnError("Ivanti rejected the final login (bad password, or the "
                             "sign-in session expired while entering the code).")
@@ -270,6 +267,27 @@ class Ivanti:
             raise KvpnError("Login did not yield a DSID cookie (unexpected server response "
                             "at %s)." % final_url)
         return dsid
+
+    def authenticate_primary(self, username, password, realm, handshake):
+        """Submit the correlation handshake before asking the portal for OTP."""
+        debug_log("primary-auth", phase="submit")
+        final_url, _ = self._submit_login(username, password, realm, handshake)
+        if "p=locked" in final_url:
+            raise KvpnError("Ivanti reports a locked sign-in. Check the official "
+                            "VPN portal before retrying.")
+        # The browser's ags_frame.js waits for this POST, but does not require
+        # DSID or treat a returned login/challenge page as the final result.
+        # onepassCheck determines whether this correlation was authenticated.
+        debug_log("primary-auth", phase="submitted")
+
+    def _submit_login(self, username, password, realm, password2):
+        return http_post(self.opener, self.login_url, {
+            "tz_offset": "540",
+            "username": username,
+            "password": password,
+            "realm": realm,
+            "password#2": password2,
+        }, referer=self.welcome_url)
 
     def _confirm_continue(self, page_url, body):
         """Submit the frmConfirmation page (btnContinue + hidden fields)."""
@@ -327,7 +345,7 @@ class Portal:
             return r.getcode(), r.headers, body
 
     def begin(self, username):
-        """Steps 2-3: mint the portal session and set the OTP context."""
+        """Mint the portal session; return the full primary-auth handshake."""
         rv = PORTAL + "/view/redirectVPN?" + urllib.parse.urlencode({
             "user_name": username,
             "time": int(time.time() * 1000),
@@ -335,17 +353,57 @@ class Portal:
             "client_id": CLIENT_ID,
             "app_name": APP_NAME,
         })
-        _, html = http_get(self.opener, rv, referer=self.parent)
+        page_url, html = http_get(self.opener, rv, referer=self.parent)
+        self._check_page("redirectVPN", page_url, html)
         m = re.search(r'name=["\']code["\'][^>]*value=[\'"]([^\'"]+)[\'"]', html)
         if not m:
             raise KvpnError("Portal did not return a correlation code (is the username "
                             "registered for 2Auth?).")
-        code = m.group(1)
+        handshake = m.group(1)
+        tag, separator, code = handshake.partition("|")
+        if tag != HANDSHAKE_TAG or not separator or not code or "|" in code:
+            raise KvpnError("Portal returned an unsupported primary-auth handshake. "
+                            "Set KVPN_DEBUG_LOG and check for a kvpn update.")
+        self.code = code
+        self.redirect_url = rv
+        debug_log("portal-init", phase="correlation-received")
+        return handshake
+
+    def _check_page(self, stage, url, body):
+        """HTTP 200 can still be an initialization failure; never send from it."""
+        lowered = body.lower()
+        path = urllib.parse.urlsplit(url).path.lower()
+        if ("invalidaccess.js" in lowered or "timeout.js" in lowered
+                or path.endswith(("/invalidaccess", "/timeout"))):
+            debug_log("portal-init", phase="rejected", stage=stage)
+            raise KvpnError("Portal initialization failed at %s (invalid access or "
+                            "expired session); no code was requested. Check your "
+                            "ID, password and realm in the official VPN portal. "
+                            "If a saved password changed, run kvpn --forget. "
+                            "Set KVPN_DEBUG_LOG to collect diagnostics." % stage)
+        if (path.startswith("/view/provision") or re.search(
+                r"location\.href\s*=\s*['\"]/view/provision|src=['\"]/js/provision",
+                body, re.I)):
+            raise KvpnError("The portal requires 2Auth registration. Complete it "
+                            "in the official VPN portal; no code was requested.")
+        if re.search(r"<title>\s*Error Page\s*</title>", body, re.I):
+            raise KvpnError("Portal initialization returned an error page at %s; "
+                            "no code was requested. Set KVPN_DEBUG_LOG to collect "
+                            "diagnostics." % stage)
+
+    def prepare_otp(self, username):
+        """After Ivanti's primary POST, complete the portal's browser handoff."""
         # onepassCheck -> vpnInit: primes the OTP context for this session
         oc = PORTAL + "/view/onepassCheck?" + urllib.parse.urlencode({
-            "user_name": username, "code": code, "parent": self.parent,
+            "user_name": username, "code": self.code, "parent": self.parent,
         })
-        http_get(self.opener, oc, referer=rv)
+        url, body = http_get(self.opener, oc, referer=self.redirect_url)
+        self._check_page("onepassCheck", url, body)
+        if (urllib.parse.urlsplit(url).path != "/vpnInit"
+                and not re.search(r"location\.href\s*=\s*['\"]/oauth/authorize", body)):
+            raise KvpnError("Portal initialization returned an unexpected page at "
+                            "onepassCheck; no code was requested. Set KVPN_DEBUG_LOG "
+                            "to collect diagnostics.")
         # GET /oauth/authorize (bounces to /request). This registers the OAuth
         # request as Spring Security's "saved request", so after the OTP login
         # the portal redirects back into the OAuth flow instead of to "/".
@@ -358,7 +416,32 @@ class Portal:
             "user_name": username,
             "parent": self.parent,
         })
-        http_get(self.opener, authorize, referer=oc)
+        url, body = http_get(self.opener, authorize, referer=url)
+        self._check_page("oauth/authorize", url, body)
+        # urllib does not execute /request's JavaScript-created POST form.
+        # Reproduce only this known handoff, never arbitrary page JavaScript.
+        if urllib.parse.urlsplit(url).path == "/request":
+            if not re.search(r"\bpost\(\s*['\"]/view/redirect['\"]\s*,", body):
+                raise KvpnError("Portal initialization returned an unexpected OAuth "
+                                "handoff; no code was requested. Set KVPN_DEBUG_LOG "
+                                "to collect diagnostics.")
+            url, body = http_post(self.opener, PORTAL + "/view/redirect", {
+                "user_name": username,
+                "client_id": CLIENT_ID,
+                "app_name": APP_NAME,
+                # /request embeds a percent-encoded parent in its form value.
+                "parent": urllib.parse.quote(self.parent, safe=""),
+            }, referer=url)
+            self._check_page("view/redirect", url, body)
+        if re.search(r"location\.href\s*=\s*['\"]/view/mainMenu['\"]", body):
+            url, body = http_get(self.opener, PORTAL + "/view/mainMenu", referer=url)
+            self._check_page("mainMenu", url, body)
+        if not re.search(r"<script\b[^>]*\bsrc=['\"]/js/mainMenu\.js(?:\?[^'\"]*)?['\"]",
+                         body, re.I):
+            raise KvpnError("Portal initialization did not reach the OTP menu; "
+                            "no code was requested. Set KVPN_DEBUG_LOG to collect "
+                            "diagnostics.")
+        debug_log("portal-init", phase="otp-ready")
 
     def send_code(self, username, send_type):
         """Step 4: request a code and require the portal's acknowledgement."""
@@ -819,7 +902,7 @@ def main(argv):
 
     debug_log("runtime", platform=sys.platform,
               python=".".join(str(part) for part in sys.version_info[:3]),
-              diagnostics_version=1)
+              diagnostics_version=2)
     print("=== KAIST VPN (kvpn) ===")
     stored = load_credentials()
     if stored:
@@ -841,7 +924,9 @@ def main(argv):
     welcome = ivanti.begin()
 
     portal = Portal(welcome)
-    portal.begin(username)
+    handshake = portal.begin(username)
+    ivanti.authenticate_primary(username, password, realm, handshake)
+    portal.prepare_otp(username)
 
     send_type = "sms" if choose("Send code via:", ["SMS", "Email"], 0) == "SMS" else "email"
     portal.send_code(username, send_type)

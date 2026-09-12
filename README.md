@@ -159,18 +159,23 @@ Linux/macOS에서는 사용자 전용(`0600`) 권한으로 저장합니다.
 
 1. `GET kvpn.kaist.ac.kr/` — Ivanti 로그인 세션을 얻습니다.
 2. `GET portal /view/redirectVPN` — 포털 세션과 correlation code를 발급받습니다.
-3. `GET portal /view/onepassCheck` → `/vpnInit` — OTP 컨텍스트를 설정합니다.
-4. `GET portal /oauth/authorize` — OAuth 요청을 Spring Security의 "saved
+3. `POST login.cgi` — ID, 비밀번호, realm과 전체 handshake 값을 `password#2`로
+   제출해 1차 인증을 진행합니다. 이 시점에는 아직 `DSID`를 요구하지 않습니다.
+4. `GET portal /view/onepassCheck` → `/vpnInit` — handshake에서 접두사를 뺀
+   correlation code로 1차 인증 결과를 확인하고 OTP 컨텍스트를 설정합니다.
+5. `GET portal /oauth/authorize` — OAuth 요청을 Spring Security의 "saved
    request"로 등록해, OTP 이후 리다이렉트가 OAuth 흐름으로 돌아오게 합니다.
-5. `POST portal /api/portal` (`cmd=AuthPortal.twoAuthSend`) — SMS/이메일 코드를
+   `/request`의 JavaScript가 만드는 `POST /view/redirect`도 수행하고 OTP 메뉴에
+   도달했는지 확인합니다. 잘못된 접근·세션 만료 페이지에서는 발송하지 않습니다.
+6. `POST portal /api/portal` (`cmd=AuthPortal.twoAuthSend`) — SMS/이메일 코드를
    발송합니다.
-6. `POST portal /j_spring_security_check.do` — 코드를 검증하면 Spring이
+7. `POST portal /j_spring_security_check.do` — 코드를 검증하면 Spring이
    `/oauth/authorize` → `/vpn/<client_id>?code=…` 로 리다이렉트합니다.
-7. 그 페이지가 노출하는 `message` 토큰이 Ivanti의 `password#2`가 됩니다.
-8. `POST login.cgi` — username, password, realm, `password#2`를 보내면 `DSID`
+8. 그 페이지가 노출하는 `message` 토큰이 Ivanti의 `password#2`가 됩니다.
+9. `POST login.cgi` — username, password, realm, `password#2`를 보내면 `DSID`
    세션 쿠키를 받습니다.
-9. `sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr` — DSID를
-   stdin으로 전달해 프로세스 목록에 노출되지 않게 합니다.
+10. `sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr` — DSID를
+    stdin으로 전달해 프로세스 목록에 노출되지 않게 합니다.
 
 ## 참고 및 문제 해결
 
@@ -180,15 +185,20 @@ Linux/macOS에서는 사용자 전용(`0600`) 권한으로 저장합니다.
   [공식 VPN 포털](https://kvpn.kaist.ac.kr/)에서 같은 계정으로 확인하세요.
   `Portal accepted`는 요청 접수가 확인됐다는 뜻이며 실제 메일함 도착을
   보장하지는 않습니다. 발송 실패 시 표시되는 `Error:` 문구를 확인하세요.
-- **검증 범위:** CI는 모의 포털 응답을 이용해 발송 성공·거절 처리와
-  이메일(`otp_flag=2`)/SMS(`otp_flag=1`) 검증 요청을 검사합니다.
+- **로그에 `onepassCheck`의 `invalid-access`가 보인다면:** 코드 발송 이전의
+  초기 인증이 실패한 것입니다. 설치 명령을 다시 실행해 갱신하세요. 새 버전의
+  로그는 `diagnostics_version: 2`이며, `onepassCheck` 전에 `POST login.cgi`가
+  나타나고 OTP 메뉴 확인 후 `portal-init`의 `phase: "otp-ready"`가 기록됩니다.
+  계속 실패하면 새 로그와 `Error:` 문구를 함께 확인하세요.
+- **검증 범위:** CI는 모의 포털 응답을 이용해 초기 인증 순서·실패 중단,
+  발송 성공·거절 처리와 이메일(`otp_flag=2`)/SMS(`otp_flag=1`) 검증 요청을 검사합니다.
   실제 KAIST 계정의 메일 수신과 VPN 연결은 CI에서 시험하지 않습니다.
 - **자격 증명 저장은 선택(opt-in)입니다.** 저장 프롬프트에서 "y"라고 답하지 않는
   한 아무것도 저장되지 않으며, `kvpn --forget`으로 전부 삭제할 수 있습니다.
   `DSID`는 어차피 일시적이고(연결이 끊기면 소멸), 일회용 코드는 매 접속마다 새로
   필요합니다.
-- **저장된 비밀번호가 낡았다면?** KAIST 비밀번호를 바꾸면 마지막 로그인 단계가
-  실패합니다 — `kvpn --forget` 후 다시 로그인하세요.
+- **저장된 비밀번호가 낡았다면?** KAIST 비밀번호를 바꾸면 초기 인증 또는 마지막
+  로그인 단계가 실패합니다 — `kvpn --forget` 후 다시 로그인하세요.
 - **Linux/macOS의 `sudo` 프롬프트 충돌:** stdin이 파이프로 연결된 탓에 `sudo`가 오작동하면
   `sudo -v`를 먼저 실행한 뒤 `./kvpn`을 실행하세요.
 - **Windows에서 OpenConnect를 찾지 못한다면:** `KVPN_OPENCONNECT`를
