@@ -203,12 +203,14 @@ def http_get(opener, url, referer=None):
         return r.geturl(), body
 
 
-def http_post(opener, url, data, referer=None):
+def http_post(opener, url, data, referer=None, headers=None):
     body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(url, data=body)
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     if referer:
         req.add_header("Referer", referer)
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
     with opener.open(req, timeout=30) as r:
         body = r.read().decode("utf-8", "replace")
         debug_response("post", "POST", url, r.geturl(), r.getcode(), r.headers, body)
@@ -271,7 +273,7 @@ class Ivanti:
     def authenticate_primary(self, username, password, realm, handshake):
         """Submit the correlation handshake before asking the portal for OTP."""
         debug_log("primary-auth", phase="submit")
-        final_url, _ = self._submit_login(username, password, realm, handshake)
+        final_url, _ = self._submit_login(username, password, realm, handshake, ajax=True)
         if "p=locked" in final_url:
             raise KvpnError("Ivanti reports a locked sign-in. Check the official "
                             "VPN portal before retrying.")
@@ -280,14 +282,19 @@ class Ivanti:
         # onepassCheck determines whether this correlation was authenticated.
         debug_log("primary-auth", phase="submitted")
 
-    def _submit_login(self, username, password, realm, password2):
+    def _submit_login(self, username, password, realm, password2, ajax=False):
+        headers = {"Origin": IVANTI}
+        if ajax:
+            # ags_frame.js uses jQuery $.post for the primary handshake. The
+            # final token is submitted by a regular browser form, not AJAX.
+            headers.update({"X-Requested-With": "XMLHttpRequest", "Accept": "*/*"})
         return http_post(self.opener, self.login_url, {
             "tz_offset": "540",
             "username": username,
             "password": password,
             "realm": realm,
             "password#2": password2,
-        }, referer=self.welcome_url)
+        }, referer=self.welcome_url, headers=headers)
 
     def _confirm_continue(self, page_url, body):
         """Submit the frmConfirmation page (btnContinue + hidden fields)."""
