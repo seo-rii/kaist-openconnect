@@ -19,7 +19,7 @@
 
 set -eu
 
-REPO_URL="https://github.com/predict-woo/kaist-openconnect.git"
+REPO_URL="https://github.com/seo-rii/kaist-openconnect.git"
 DEFAULT_INSTALL_DIR="$HOME/.local/share/kaist-openconnect"
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -112,8 +112,10 @@ install_deps_linux() {
         linux_install pacman -S --noconfirm --needed $pkgs
     elif have zypper; then
         linux_install zypper install -y $pkgs
+    elif have apk; then
+        linux_install apk add $pkgs
     else
-        die "No supported package manager found (apt/dnf/pacman/zypper). Please install manually: $pkgs"
+        die "No supported package manager found (apt/dnf/pacman/zypper/apk). Please install manually: $pkgs"
     fi
 }
 

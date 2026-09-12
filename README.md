@@ -8,18 +8,37 @@
 ID, 비밀번호, 일회용 코드(SMS 또는 이메일)를 입력받아 2단계 인증을 완료한 뒤
 [OpenConnect](https://www.infradead.org/openconnect/)로 터널을 엽니다.
 
-## 설치
+## 설치 (Windows, Linux, macOS)
+
+### Linux / macOS
 
 터미널에 아래 한 줄을 붙여넣으면 끝입니다 — Homebrew(macOS, 없을 때만)와
 OpenConnect까지 필요한 것을 전부 설치하고, `kvpn`을 `PATH`에 연결합니다:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/predict-woo/kaist-openconnect/main/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/seo-rii/kaist-openconnect/main/install.sh)"
 ```
 
 설치가 끝나면 `kvpn`으로 실행하세요. 이미 설치된 것은 건너뛰므로 다시 실행해도
 안전하며, 다시 실행하면 kvpn이 최신 버전으로 갱신됩니다. Linux에서는 배포판
-패키지 관리자(apt/dnf/pacman/zypper)로 의존성을 설치합니다.
+패키지 관리자(apt/dnf/pacman/zypper/apk)로 의존성을 설치합니다.
+
+### Windows
+
+먼저 [Python 3](https://www.python.org/downloads/windows/)를 설치하세요. 공식
+[OpenConnect 9.21 Windows 빌드 ZIP](https://gitlab.com/openconnect/openconnect/-/jobs/artifacts/v9.21/download?job=MinGW64%2FGnuTLS)을
+내려받아 압축을 풀고 `openconnect-installer-MinGW64-GnuTLS-v9.21.exe`를 실행하면
+OpenConnect와 Wintun 드라이버가 설치됩니다. 그 다음 일반 PowerShell에서 아래
+명령으로 `kvpn`을 사용자 `PATH`에 설치합니다:
+
+```powershell
+irm https://raw.githubusercontent.com/seo-rii/kaist-openconnect/main/install.ps1 | iex
+```
+
+VPN 연결은 터널 장치를 만들 권한이 필요하므로 **관리자 권한 PowerShell 또는 명령
+프롬프트**를 열어 `kvpn`을 실행하세요. OpenConnect를 기본 위치가 아닌 곳에
+설치했다면 실행 전에 `KVPN_OPENCONNECT` 환경 변수에 `openconnect.exe`의 전체
+경로를 지정하면 됩니다.
 
 <details>
 <summary>수동 설치 (설치 스크립트를 쓰고 싶지 않다면)</summary>
@@ -27,11 +46,14 @@ OpenConnect까지 필요한 것을 전부 설치하고, `kvpn`을 `PATH`에 연�
 [요구 사항](#요구-사항)을 직접 설치한 뒤:
 
 ```sh
-git clone https://github.com/predict-woo/kaist-openconnect.git
+git clone https://github.com/seo-rii/kaist-openconnect.git
 cd kaist-openconnect
 chmod +x kvpn
 ./kvpn
 ```
+
+Windows에서는 같은 체크아웃에서 `./install.ps1`을 실행한 뒤 관리자 터미널에서
+`kvpn`을 실행하세요.
 
 원한다면 `PATH`에 추가하세요:
 
@@ -78,10 +100,11 @@ openconnect를 실행하라"는 것이었습니다. 이 도구는 그 과정 전
 - **Python 3** (표준 라이브러리만 사용 — `pip install` 불필요)
 - **[OpenConnect](https://www.infradead.org/openconnect/)** — `PATH`에 있어야
   합니다 (macOS에서는 `brew install openconnect`)
-- `sudo` 권한 (OpenConnect가 터널 인터페이스를 만들려면 root가 필요합니다)
+- 관리자 권한 (`sudo` 또는 Windows 관리자 터미널; OpenConnect가 터널
+  인터페이스를 만들 때 필요합니다)
 
-macOS에서 개발·테스트했습니다. Linux에서도 OpenConnect 기본 `vpnc-script`로
-동작할 것으로 예상합니다; 제보 환영합니다.
+Linux에서는 OpenConnect 패키지의 기본 `vpnc-script`를, Windows에서는 공식
+설치기에 포함된 Wintun과 `vpnc-script-win.js`를 사용합니다.
 
 ## 사용법
 
@@ -92,11 +115,12 @@ macOS에서 개발·테스트했습니다. Linux에서도 OpenConnect 기본 `vp
 ### 자격 증명 저장
 
 로그인에 성공하면 kvpn이 자격 증명 저장을 제안하며, 저장해 두면 이후 실행은
-곧바로 "Send code via" 단계로 넘어갑니다. 비밀번호는 **macOS 키체인**(서비스명
-`kvpn`)에, ID와 realm은 `~/.config/kvpn/config.json`(사용자 전용, `0600`)에
-저장됩니다. 키체인이 없는 시스템에서는 비밀번호도 같은 `0600` 파일에 저장됩니다
-(저장 전에 경고를 띄웁니다). 어느 경우든 일회용 코드는 매 접속마다 새로
-필요합니다.
+곧바로 "Send code via" 단계로 넘어갑니다. 비밀번호는 macOS에서는 **키체인**에,
+Windows에서는 **Windows 자격 증명 관리자**에 저장됩니다. ID와 realm은 macOS와
+Linux의 `~/.config/kvpn/config.json`, Windows의
+`%APPDATA%\kvpn\config.json`에 저장됩니다. 보안 저장소가 없는 Linux에서는
+비밀번호도 사용자 전용(`0600`) 설정 파일에 저장되며 저장 전에 경고합니다. 어느
+경우든 일회용 코드는 매 접속마다 새로 필요합니다.
 
 저장된 내용을 모두 삭제하려면:
 
@@ -139,8 +163,11 @@ KVPN_DEBUG=1 ./kvpn
   필요합니다.
 - **저장된 비밀번호가 낡았다면?** KAIST 비밀번호를 바꾸면 마지막 로그인 단계가
   실패합니다 — `kvpn --forget` 후 다시 로그인하세요.
-- **`sudo` 프롬프트 충돌:** stdin이 파이프로 연결된 탓에 `sudo`가 오작동하면
+- **Linux/macOS의 `sudo` 프롬프트 충돌:** stdin이 파이프로 연결된 탓에 `sudo`가 오작동하면
   `sudo -v`를 먼저 실행한 뒤 `./kvpn`을 실행하세요.
+- **Windows에서 OpenConnect를 찾지 못한다면:** `KVPN_OPENCONNECT`를
+  `openconnect.exe`의 전체 경로로 설정하세요. 기본 공식 설치 위치인
+  `C:\Program Files\OpenConnect`는 자동으로 찾습니다.
 - **무해한 라우트 경고:** 접속 시 자기 VPN IP로의 라우트나 이미 존재하는 라우트에
   대해 `Can't assign requested address` / `File exists` 같은 줄이 보일 수
   있습니다. 나머지 라우트는 모두 정상적으로 설치되며 연결에는 영향이 없습니다.

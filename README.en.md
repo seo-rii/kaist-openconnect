@@ -10,20 +10,39 @@ It prompts for your ID, password, and one-time code (SMS or email), completes th
 two-factor handshake, and then brings the tunnel up with
 [OpenConnect](https://www.infradead.org/openconnect/).
 
-## Install
+## Install (Windows, Linux, macOS)
+
+### Linux / macOS
 
 Paste this one line into your terminal — it installs everything you need
 (Homebrew on macOS if missing, plus OpenConnect) and links `kvpn` onto your
 `PATH`:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/predict-woo/kaist-openconnect/main/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/seo-rii/kaist-openconnect/main/install.sh)"
 ```
 
 Then just run `kvpn`. It skips anything already installed, so it's safe to
 re-run — re-running also updates kvpn to the latest version. On Linux it uses
-your distribution's package manager (apt/dnf/pacman/zypper) for the
+your distribution's package manager (apt/dnf/pacman/zypper/apk) for the
 dependencies.
+
+### Windows
+
+First install [Python 3](https://www.python.org/downloads/windows/). Download
+the official [OpenConnect 9.21 Windows build ZIP](https://gitlab.com/openconnect/openconnect/-/jobs/artifacts/v9.21/download?job=MinGW64%2FGnuTLS),
+extract it, and run `openconnect-installer-MinGW64-GnuTLS-v9.21.exe` to install
+OpenConnect and its Wintun driver. Then run this in a normal PowerShell to
+install `kvpn` on your user `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/seo-rii/kaist-openconnect/main/install.ps1 | iex
+```
+
+Open an **Administrator PowerShell or Command Prompt** to run `kvpn`, because
+creating the tunnel device requires elevated rights. If OpenConnect is in a
+nonstandard location, set `KVPN_OPENCONNECT` to the full path of
+`openconnect.exe` before running kvpn.
 
 <details>
 <summary>Manual install (if you'd rather not run the installer)</summary>
@@ -31,11 +50,14 @@ dependencies.
 Install the [requirements](#requirements) yourself, then:
 
 ```sh
-git clone https://github.com/predict-woo/kaist-openconnect.git
+git clone https://github.com/seo-rii/kaist-openconnect.git
 cd kaist-openconnect
 chmod +x kvpn
 ./kvpn
 ```
+
+On Windows, run `./install.ps1` from the checkout, then run `kvpn` in an
+Administrator terminal.
 
 Optionally put it on your `PATH`:
 
@@ -82,10 +104,11 @@ a fresh one-time code on every connection — exactly like the official client.
 - **Python 3** (standard library only — no `pip install`)
 - **[OpenConnect](https://www.infradead.org/openconnect/)** on your `PATH`
   (`brew install openconnect` on macOS)
-- `sudo` rights (OpenConnect needs root to create the tunnel interface)
+- administrator rights (`sudo` or an Administrator terminal on Windows;
+  OpenConnect needs them to create the tunnel interface)
 
-Developed and tested on macOS. It should work on Linux with OpenConnect's default
-`vpnc-script`; reports welcome.
+Linux uses the `vpnc-script` supplied by its OpenConnect package. Windows uses
+Wintun and `vpnc-script-win.js` from the official OpenConnect installer.
 
 ## Usage
 
@@ -96,10 +119,12 @@ terminal running it — OpenConnect tears down the tunnel and restores your rout
 
 After a successful login, kvpn offers to store your credentials so future runs
 jump straight to the "Send code via" prompt. The password goes into the
-**macOS Keychain** (service `kvpn`); your ID and realm go into
-`~/.config/kvpn/config.json` (user-only, `0600`). On systems without a
-Keychain, the password is kept in that same `0600` file instead (kvpn warns
-you first). A fresh one-time code is still required on every connection.
+**macOS Keychain** on macOS and **Windows Credential Manager** on Windows. Your
+ID and realm go into `~/.config/kvpn/config.json` on macOS/Linux and
+`%APPDATA%\kvpn\config.json` on Windows. On Linux, where no native credential
+store is assumed, the password is kept in the user-only (`0600`) config file
+instead (kvpn warns you first). A fresh one-time code is still required on every
+connection.
 
 To remove everything that was stored:
 
@@ -141,8 +166,11 @@ and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
   required on every connection.
 - **Stored password went stale?** If your KAIST password changes, the final
   login step will fail — run `kvpn --forget` and log in again.
-- **`sudo` prompt collision:** if `sudo` misbehaves because stdin is piped, run
+- **Linux/macOS `sudo` prompt collision:** if `sudo` misbehaves because stdin is piped, run
   `sudo -v` first, then `./kvpn`.
+- **OpenConnect not found on Windows:** set `KVPN_OPENCONNECT` to the full path
+  of `openconnect.exe`. The standard official install location under
+  `C:\Program Files\OpenConnect` is detected automatically.
 - **Harmless route warnings:** on connect you may see two lines like
   `Can't assign requested address` / `File exists` for a route to your own VPN IP
   or an already-present route. Every other route still installs; this doesn't

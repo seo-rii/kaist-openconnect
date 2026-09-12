@@ -12,12 +12,13 @@ Flow (reverse-engineered from the live service):
   5. POST portal /j_spring_security_check.do -> verify code (-> OAuth)
   6. GET  portal /vpn/<client_id>?code -> read `message` = the password#2 token
   7. POST login.cgi (user+pass+realm+password#2) -> DSID
-  8. sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr
+  8. openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr
 
-Credentials can optionally be stored (password in the macOS Keychain, id/realm
-in ~/.config/kvpn/config.json); `kvpn --forget` removes them again.
+Credentials can optionally be stored (password in the macOS Keychain or Windows
+Credential Manager, id/realm in the platform config directory); `kvpn --forget`
+removes them again.
 
-Requires: python3 (stdlib only) and openconnect on PATH.
+Requires: Python 3 (stdlib only) and OpenConnect.
 """
 import sys
 import os
@@ -38,8 +39,20 @@ PORTAL = "https://kvpnportal.kaist.ac.kr:8443"
 CLIENT_ID = "rmwb8juiS8oJ5XVK"
 APP_NAME = "vpn2auth"
 REALMS = ["KAIST Members", "Visitors", "Graduates"]
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def platform_user_agent():
+    if sys.platform == "win32":
+        platform = "Windows NT 10.0; Win64; x64"
+    elif sys.platform == "darwin":
+        platform = "Macintosh; Intel Mac OS X 10_15_7"
+    else:
+        platform = "X11; Linux x86_64"
+    return ("Mozilla/5.0 (%s) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36") % platform
+
+
+UA = platform_user_agent()
 
 
 class KvpnError(Exception):
@@ -272,12 +285,19 @@ class Portal:
 # credential storage (opt-in)
 # --------------------------------------------------------------------------
 # The KAIST ID and realm live in a 0600 config file; the password goes into
-# the macOS Keychain (service "kvpn"). Off macOS the password falls back into
-# the config file itself, still 0600, with a warning at save time.
+# the macOS Keychain (service "kvpn") or Windows Credential Manager. On other
+# systems the password falls back into the config file itself, still 0600, with
+# a warning at save time.
 KEYCHAIN_SERVICE = "kvpn"
+WINDOWS_CREDENTIAL_TARGET = "kaist-openconnect/kvpn"
 
 
 def config_path():
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        if not base:
+            base = os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(base, "kvpn", "config.json")
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     return os.path.join(base, "kvpn", "config.json")
 
@@ -318,6 +338,96 @@ def keychain_delete(username):
     return r.returncode == 0
 
 
+def _windows_credential_api():
+    """Return the native Credential Manager API and its CREDENTIALW type."""
+    import ctypes
+    from ctypes import wintypes
+
+    class CredentialW(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    advapi.CredWriteW.argtypes = [ctypes.POINTER(CredentialW), wintypes.DWORD]
+    advapi.CredWriteW.restype = wintypes.BOOL
+    advapi.CredReadW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(CredentialW)),
+    ]
+    advapi.CredReadW.restype = wintypes.BOOL
+    advapi.CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
+    advapi.CredDeleteW.restype = wintypes.BOOL
+    advapi.CredFree.argtypes = [ctypes.c_void_p]
+    advapi.CredFree.restype = None
+    return ctypes, advapi, CredentialW
+
+
+def windows_credential_set(username, password):
+    """Store a password with the current user's Windows Credential Manager."""
+    ctypes, advapi, credential_type = _windows_credential_api()
+    blob = password.encode("utf-16-le")
+    blob_buffer = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+    credential = credential_type()
+    credential.Type = 1  # CRED_TYPE_GENERIC
+    credential.TargetName = WINDOWS_CREDENTIAL_TARGET
+    credential.CredentialBlobSize = len(blob)
+    credential.CredentialBlob = ctypes.cast(
+        blob_buffer, ctypes.POINTER(ctypes.c_ubyte))
+    credential.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE (per-user profile)
+    credential.UserName = username
+    if not advapi.CredWriteW(ctypes.byref(credential), 0):
+        raise KvpnError("Could not write to Windows Credential Manager "
+                        "(error %s)." % ctypes.get_last_error())
+
+
+def windows_credential_get(username):
+    """Read this user's password from Windows Credential Manager, if present."""
+    ctypes, advapi, credential_type = _windows_credential_api()
+    result = ctypes.POINTER(credential_type)()
+    if not advapi.CredReadW(WINDOWS_CREDENTIAL_TARGET, 1, 0,
+                            ctypes.byref(result)):
+        error = ctypes.get_last_error()
+        if error == 1168:  # ERROR_NOT_FOUND
+            return None
+        raise KvpnError("Could not read Windows Credential Manager (error %s)."
+                        % error)
+    try:
+        credential = result.contents
+        if credential.UserName != username:
+            return None
+        blob = ctypes.string_at(credential.CredentialBlob,
+                                credential.CredentialBlobSize)
+        return blob.decode("utf-16-le")
+    finally:
+        advapi.CredFree(result)
+
+
+def windows_credential_delete():
+    """Delete the kvpn entry from Windows Credential Manager."""
+    ctypes, advapi, _ = _windows_credential_api()
+    if advapi.CredDeleteW(WINDOWS_CREDENTIAL_TARGET, 1, 0):
+        return True
+    error = ctypes.get_last_error()
+    if error == 1168:  # ERROR_NOT_FOUND
+        return False
+    raise KvpnError("Could not delete the Windows Credential Manager entry "
+                    "(error %s)." % error)
+
+
 def _read_config():
     try:
         with open(config_path()) as f:
@@ -333,6 +443,8 @@ def _write_config(cfg):
     with os.fdopen(fd, "w") as f:
         json.dump(cfg, f, indent=2)
         f.write("\n")
+    if sys.platform != "win32":
+        os.chmod(path, 0o600)
 
 
 def save_credentials(username, password, realm):
@@ -341,7 +453,10 @@ def save_credentials(username, password, realm):
     cfg.update({"username": username, "realm": realm})
     cfg.pop("password", None)
     where = "config file %s" % config_path()
-    if keychain_available():
+    if sys.platform == "win32":
+        windows_credential_set(username, password)
+        where = "Windows Credential Manager (id/realm in %s)" % config_path()
+    elif keychain_available():
         keychain_set(username, password)
         where = "macOS Keychain (id/realm in %s)" % config_path()
     else:
@@ -357,8 +472,11 @@ def load_credentials():
     if not username:
         return None
     password = cfg.get("password")
-    if password is None and keychain_available():
-        password = keychain_get(username)
+    if password is None:
+        if sys.platform == "win32":
+            password = windows_credential_get(username)
+        elif keychain_available():
+            password = keychain_get(username)
     if not password:
         return None
     realm = cfg.get("realm")
@@ -371,7 +489,12 @@ def forget_credentials():
     """Remove everything `save_credentials` wrote. Returns True if any existed."""
     removed = False
     username = _read_config().get("username")
-    if username and keychain_available() and keychain_delete(username):
+    if sys.platform == "win32":
+        if windows_credential_delete():
+            suffix = " for %s" % username if username else ""
+            print("Removed the Windows Credential Manager entry%s." % suffix)
+            removed = True
+    elif username and keychain_available() and keychain_delete(username):
         print("Removed the Keychain entry for %s." % username)
         removed = True
     try:
@@ -384,14 +507,19 @@ def forget_credentials():
 
 
 def offer_to_save(username, password, realm):
-    dest = "the macOS Keychain" if keychain_available() else config_path()
+    if sys.platform == "win32":
+        dest = "Windows Credential Manager"
+    elif keychain_available():
+        dest = "the macOS Keychain"
+    else:
+        dest = config_path()
     try:
         ans = input("Store these credentials in %s for future logins? [y/N]: "
                     % dest).strip().lower()
     except EOFError:
         return
     if ans in ("y", "yes"):
-        if not keychain_available():
+        if sys.platform != "win32" and not keychain_available():
             print("  Note: no Keychain here; the password is stored in a "
                   "user-only (0600) file.")
         where = save_credentials(username, password, realm)
@@ -401,14 +529,74 @@ def offer_to_save(username, password, realm):
 # --------------------------------------------------------------------------
 # openconnect
 # --------------------------------------------------------------------------
-def launch_tunnel(dsid):
-    oc = shutil.which("openconnect")
-    if not oc:
-        raise KvpnError("openconnect not found on PATH. Install it (brew install openconnect).")
+def find_openconnect():
+    override = os.environ.get("KVPN_OPENCONNECT")
+    if override:
+        resolved = shutil.which(override)
+        if resolved:
+            return resolved
+        override = os.path.abspath(os.path.expanduser(override))
+        if os.path.isfile(override):
+            return override
+        raise KvpnError("KVPN_OPENCONNECT does not point to an executable: %s"
+                        % override)
+
+    for name in ("openconnect", "openconnect.exe"):
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+
+    if sys.platform == "win32":
+        roots = [os.environ.get("ProgramW6432"),
+                 os.environ.get("ProgramFiles"),
+                 os.environ.get("ProgramFiles(x86)")]
+        for root in filter(None, roots):
+            for directory in ("OpenConnect", "OpenConnect-GUI"):
+                candidate = os.path.join(root, directory, "openconnect.exe")
+                if os.path.isfile(candidate):
+                    return candidate
+    return None
+
+
+def windows_is_admin():
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
+def tunnel_command(openconnect):
     host = IVANTI.split("//", 1)[1]
-    cmd = ["sudo", oc, "--protocol=nc", "--cookie-on-stdin", host]
-    print("\nBringing up the tunnel (sudo will prompt for your Mac password)...")
-    print("  $ sudo openconnect --protocol=nc --cookie-on-stdin %s" % host)
+    args = [openconnect, "--protocol=nc", "--cookie-on-stdin", host]
+    if sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0):
+        return args
+    sudo = shutil.which("sudo")
+    if not sudo:
+        raise KvpnError("Administrator access is required, but sudo was not found.")
+    return [sudo] + args
+
+
+def launch_tunnel(dsid):
+    oc = find_openconnect()
+    if not oc:
+        raise KvpnError("openconnect not found. Install it or set KVPN_OPENCONNECT to "
+                        "the openconnect executable.")
+    if sys.platform == "win32" and not windows_is_admin():
+        raise KvpnError("Open an Administrator PowerShell or Command Prompt and run "
+                        "kvpn again (OpenConnect needs permission to create the tunnel).")
+    host = IVANTI.split("//", 1)[1]
+    cmd = tunnel_command(oc)
+    print("\nBringing up the tunnel%s..." %
+          ("" if sys.platform == "win32" else " (sudo may prompt for your password)"))
+    if sys.platform == "win32":
+        display_command = subprocess.list2cmdline(cmd)
+    else:
+        import shlex
+        display_command = shlex.join(cmd)
+    print("  $ %s" % display_command)
     # DSID goes in via stdin so it never appears in the process list.
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     try:
