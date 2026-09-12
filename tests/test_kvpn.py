@@ -38,11 +38,13 @@ class PlatformTests(unittest.TestCase):
                 os.path.join(r"C:\Users\test\AppData\Roaming", "kvpn", "config.json"),
             )
 
-    def test_linux_config_uses_xdg_config_home(self):
+    def test_non_windows_config_uses_xdg_config_home(self):
         with mock.patch.object(kvpn.sys, "platform", "linux"), mock.patch.dict(
             kvpn.os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg"}
         ):
-            self.assertEqual(kvpn.config_path(), "/tmp/xdg/kvpn/config.json")
+            self.assertEqual(
+                kvpn.config_path(), os.path.join("/tmp/xdg", "kvpn", "config.json")
+            )
 
     def test_windows_finds_openconnect_in_default_install_dir(self):
         program_files = r"C:\Program Files"
@@ -77,7 +79,7 @@ class PlatformTests(unittest.TestCase):
 
     def test_non_root_linux_tunnel_command_uses_sudo(self):
         with mock.patch.object(kvpn.sys, "platform", "linux"), mock.patch.object(
-            kvpn.os, "geteuid", return_value=1000
+            kvpn.os, "geteuid", return_value=1000, create=True
         ), mock.patch.object(kvpn.shutil, "which", return_value="/usr/bin/sudo"):
             self.assertEqual(
                 kvpn.tunnel_command("/usr/bin/openconnect")[:2],
@@ -129,6 +131,7 @@ class CredentialTests(unittest.TestCase):
         with mock.patch.object(kvpn, "WINDOWS_CREDENTIAL_TARGET", target):
             self.assertIsNone(kvpn.windows_credential_get("nobody"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX permission test")
     def test_linux_config_file_permissions_are_private(self):
         path = os.path.join(self.tempdir.name, "kvpn", "config.json")
         with mock.patch.object(kvpn.sys, "platform", "linux"), mock.patch.object(
