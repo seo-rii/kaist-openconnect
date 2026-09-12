@@ -30,6 +30,7 @@ import getpass
 import shutil
 import subprocess
 import http.cookiejar
+import urllib.error
 import urllib.request
 import urllib.parse
 
@@ -39,6 +40,7 @@ PORTAL = "https://kvpnportal.kaist.ac.kr:8443"
 CLIENT_ID = "rmwb8juiS8oJ5XVK"
 APP_NAME = "vpn2auth"
 REALMS = ["KAIST Members", "Visitors", "Graduates"]
+OTP_FLAGS = {"sms": "1", "email": "2"}
 
 
 def platform_user_agent():
@@ -188,7 +190,7 @@ class Portal:
         self.raw.addheaders = [("User-Agent", UA)]
         self.parent = parent_url
 
-    def _raw(self, method, url, data=None, referer=None):
+    def _raw(self, method, url, data=None, referer=None, headers=None):
         """Single request, no redirect following. Returns (status, headers, body)."""
         body = urllib.parse.urlencode(data).encode() if data is not None else None
         req = urllib.request.Request(url, data=body, method=method)
@@ -199,6 +201,8 @@ class Portal:
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
         if referer:
             req.add_header("Referer", referer)
+        for name, value in (headers or {}).items():
+            req.add_header(name, value)
         with self.raw.open(req, timeout=30) as r:
             return r.getcode(), r.headers, r.read().decode("utf-8", "replace")
 
@@ -237,22 +241,72 @@ class Portal:
         http_get(self.opener, authorize, referer=oc)
 
     def send_code(self, username, send_type):
-        """Step 4: trigger an SMS or Email one-time code."""
-        http_post(self.opener, PORTAL + "/api/portal", {
-            "cmd": "AuthPortal.twoAuthSend",
-            "send_type": send_type,          # "sms" or "email"
-            "user_name": username,
-        }, referer=self.parent)
+        """Step 4: request a code and require the portal's acknowledgement."""
+        if send_type not in OTP_FLAGS:
+            raise KvpnError("Unsupported code delivery method: %s" % send_type)
+        # Match twoAuth_send() in the portal's /js/mainMenu.js. This is a
+        # same-origin AJAX call from the portal, not an Ivanti form submission.
+        # Do not follow redirects: an expired-session page is not acceptance.
+        try:
+            status, _, body = self._raw("POST", PORTAL + "/api/portal", data={
+                "cmd": "AuthPortal.twoAuthSend",
+                "send_type": send_type,
+                "user_name": username,
+            }, referer=PORTAL + "/view/mainMenu", headers={
+                "Accept": "*/*",
+                "Origin": PORTAL,
+                "X-Requested-With": "XMLHttpRequest",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+            })
+        except (urllib.error.URLError, OSError) as exc:
+            raise KvpnError("Could not confirm the %s code request (%s). "
+                            "Check your connection to the VPN portal before retrying."
+                            % (send_type.upper(), type(exc).__name__)) from None
+        if status != 200:
+            raise KvpnError("The portal did not accept the %s code request "
+                            "(HTTP %s). Restart kvpn or check the official VPN portal."
+                            % (send_type.upper(), status))
+        try:
+            result = json.loads(body)
+        except ValueError:
+            result = None
+        if not isinstance(result, dict) or "success" not in result:
+            raise KvpnError("The portal returned an unexpected response to the %s "
+                            "code request. Delivery is not confirmed; restart kvpn "
+                            "or check the official VPN portal." % send_type.upper())
+        success = result["success"]
+        if success is True or success == "true":
+            return
+        reason = result.get("reason")
+        if reason == "emailNull":
+            raise KvpnError("The portal reports no registered email address "
+                            "[emailNull]. Check this KAIST ID's email in the "
+                            "official VPN portal or use SMS.")
+        if reason == "phoneNumberNull":
+            raise KvpnError("The portal reports no registered phone number "
+                            "[phoneNumberNull]. Check this KAIST ID's phone "
+                            "number in the official VPN portal or use Email.")
+        # Only expose a short symbolic reason, never dump a response containing
+        # user data, session cookies, or one-time codes into terminal diagnostics.
+        detail = ""
+        if isinstance(reason, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", reason):
+            detail = " [%s]" % reason
+        raise KvpnError("The portal rejected the %s code request%s. "
+                        "Check the same account in the official VPN portal."
+                        % (send_type.upper(), detail))
 
-    def verify(self, username, otp):
+    def verify(self, username, otp, send_type="sms"):
         """Steps 5-6: verify the code, walk the OAuth chain by hand, return password#2."""
+        if send_type not in OTP_FLAGS:
+            raise KvpnError("Unsupported code delivery method: %s" % send_type)
         debug = os.environ.get("KVPN_DEBUG")
         mainmenu = PORTAL + "/view/mainMenu"
 
         status, hdrs, _ = self._raw("POST", PORTAL + "/j_spring_security_check.do", {
             "j_username": username,
             "j_password": otp,
-            "otp_flag": "1",
+            "otp_flag": OTP_FLAGS[send_type],
         }, referer=mainmenu)
         if debug:
             print("  [verify] j_spring -> %s %s" % (status, hdrs.get("Location", "")[:90]))
@@ -670,13 +724,14 @@ def main(argv):
 
     send_type = "sms" if choose("Send code via:", ["SMS", "Email"], 0) == "SMS" else "email"
     portal.send_code(username, send_type)
-    print("Code sent via %s. It may take up to a minute to arrive." % send_type.upper())
+    print("Portal accepted the %s code request. It may take up to a minute to arrive."
+          % send_type.upper())
 
     otp = input("Enter the code: ").strip()
     if not otp:
         raise KvpnError("A code is required.")
 
-    password2 = portal.verify(username, otp)
+    password2 = portal.verify(username, otp, send_type=send_type)
     try:
         dsid = ivanti.finish(username, password, realm, password2)
     except KvpnError as e:

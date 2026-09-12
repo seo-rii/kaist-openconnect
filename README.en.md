@@ -160,6 +160,15 @@ and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
 
 ## Notes & troubleshooting
 
+- **Email/SMS code did not arrive?** kvpn asks for a code only after the portal
+  accepts the request with `success: "true"`. `emailNull` or `phoneNumberNull`
+  means the portal has no registered contact of that type. Check the same account
+  in the [official VPN portal](https://kvpn.kaist.ac.kr/). `Portal accepted` confirms
+  request acceptance, not delivery to your inbox. Check the `Error:` message if
+  the request fails.
+- **Test coverage:** CI uses simulated portal responses to check accepted and
+  rejected send requests and Email (`otp_flag=2`)/SMS (`otp_flag=1`) verification.
+  It does not test mail delivery or VPN connections with a real KAIST account.
 - **Credential storage is opt-in.** Nothing is saved unless you answer "y" at
   the store prompt; `kvpn --forget` removes it all. The `DSID` is ephemeral
   either way (it dies when you disconnect), and a fresh one-time code is
