@@ -32,6 +32,7 @@ import getpass
 import shutil
 import subprocess
 import http.cookiejar
+from html.parser import HTMLParser
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -168,6 +169,100 @@ def _debug_body(body):
     return {**summary, "kind": "json", "shape": shape(payload)}
 
 
+class _IvantiDiagnosticParser(HTMLParser):
+    """Inspect form structure and error regions, never expose arbitrary text."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.login_form = False
+        self.in_login = False
+        self.fields = set()
+        self.other_field_count = 0
+        self.error_tag = None
+        self.error_depth = 0
+        self.error_text = []
+        self.error_regions = []
+        self.ignored_tag = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = {name: value or "" for name, value in attrs}
+        if tag in ("script", "style"):
+            self.ignored_tag = tag
+            return
+        if self.ignored_tag:
+            return
+        if tag == "form":
+            self.in_login = attrs.get("name", "").lower() == "frmlogin"
+            self.login_form = self.login_form or self.in_login
+        if self.in_login and tag in ("input", "select", "textarea"):
+            name = attrs.get("name")
+            if name and "disabled" not in attrs:
+                if name in ("username", "password", "realm", "tz_offset", "password#2"):
+                    self.fields.add(name)
+                else:
+                    self.other_field_count += 1
+        if self.error_tag:
+            if tag == self.error_tag:
+                self.error_depth += 1
+            return
+        style = re.sub(r"\s+", "", attrs.get("style", "")).lower()
+        classes = attrs.get("class", "").lower().split()
+        if (tag in ("p", "div", "span", "td") and (
+                re.search(r"(?:^|;)color:#ff0000(?:;|$)", style)
+                or attrs.get("role", "").lower() == "alert"
+                or set(classes).intersection(("csserror", "error-message")))):
+            self.error_tag = tag
+            self.error_depth = 1
+            self.error_text = []
+
+    def handle_endtag(self, tag):
+        if self.ignored_tag:
+            if tag == self.ignored_tag:
+                self.ignored_tag = None
+            return
+        if tag == "form":
+            self.in_login = False
+        if tag == self.error_tag:
+            self.error_depth -= 1
+            if not self.error_depth:
+                self.error_regions.append(" ".join(self.error_text))
+                self.error_tag = None
+
+    def handle_data(self, data):
+        if self.error_tag and not self.ignored_tag:
+            self.error_text.append(data)
+
+
+def _ivanti_response_summary(body):
+    """Return only fixed labels and counts for the gateway's login response."""
+    parser = _IvantiDiagnosticParser()
+    parser.feed(body[:131072])
+    parser.close()
+    regions = parser.error_regions
+    if parser.error_tag:
+        regions = regions + [" ".join(parser.error_text)]
+    errors = []
+    lengths = []
+    for region in regions[:8]:
+        text = " ".join(region.lower().split())
+        if not text:
+            continue
+        lengths.append(len(text))
+        labels = {
+            "invalid-credentials": ("invalid username or password",),
+            "invalid-request": ("invalid request",),
+            "login-failed": ("sign-in failed", "login failed"),
+            "access-denied": ("access denied",),
+            "account-locked": ("account is locked", "account locked"),
+            "session-expired": ("session has expired", "session expired"),
+        }
+        matched = [label for label, markers in labels.items()
+                   if any(marker in text for marker in markers)]
+        errors.extend(matched or ["unknown-error"])
+    return {"login_form": parser.login_form, "fields": sorted(parser.fields),
+            "other_field_count": parser.other_field_count,
+            "errors": sorted(set(errors)), "error_text_lengths": lengths}
+
+
 def debug_response(stage, method, request_url, response_url, status, headers, body):
     if not os.environ.get("KVPN_DEBUG") and not os.environ.get("KVPN_DEBUG_LOG"):
         return
@@ -273,14 +368,18 @@ class Ivanti:
     def authenticate_primary(self, username, password, realm, handshake):
         """Submit the correlation handshake before asking the portal for OTP."""
         debug_log("primary-auth", phase="submit")
-        final_url, _ = self._submit_login(username, password, realm, handshake, ajax=True)
+        final_url, body = self._submit_login(username, password, realm, handshake, ajax=True)
+        if os.environ.get("KVPN_DEBUG") or os.environ.get("KVPN_DEBUG_LOG"):
+            debug_log("primary-auth", phase="submitted",
+                      response=_ivanti_response_summary(body),
+                      cookies={name: cookie_value(self.cj, name) is not None
+                               for name in ("DSSIGNIN", "DSID")})
         if "p=locked" in final_url:
             raise KvpnError("Ivanti reports a locked sign-in. Check the official "
                             "VPN portal before retrying.")
         # The browser's ags_frame.js waits for this POST, but does not require
         # DSID or treat a returned login/challenge page as the final result.
         # onepassCheck determines whether this correlation was authenticated.
-        debug_log("primary-auth", phase="submitted")
 
     def _submit_login(self, username, password, realm, password2, ajax=False):
         headers = {"Origin": IVANTI}
@@ -384,10 +483,11 @@ class Portal:
                 or path.endswith(("/invalidaccess", "/timeout"))):
             debug_log("portal-init", phase="rejected", stage=stage)
             raise KvpnError("Portal initialization failed at %s (invalid access or "
-                            "expired session); no code was requested. Check your "
-                            "ID, password and realm in the official VPN portal. "
-                            "If a saved password changed, run kvpn --forget. "
-                            "Set KVPN_DEBUG_LOG to collect diagnostics." % stage)
+                            "expired session); no code was requested. The portal "
+                            "did not confirm primary authentication; this response "
+                            "alone does not identify the cause. Compare login in "
+                            "the official VPN portal and collect the primary-auth "
+                            "diagnostics with KVPN_DEBUG_LOG." % stage)
         if (path.startswith("/view/provision") or re.search(
                 r"location\.href\s*=\s*['\"]/view/provision|src=['\"]/js/provision",
                 body, re.I)):
@@ -909,7 +1009,7 @@ def main(argv):
 
     debug_log("runtime", platform=sys.platform,
               python=".".join(str(part) for part in sys.version_info[:3]),
-              diagnostics_version=2)
+              diagnostics_version=3)
     print("=== KAIST VPN (kvpn) ===")
     stored = load_credentials()
     if stored:

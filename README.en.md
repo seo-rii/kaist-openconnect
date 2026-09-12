@@ -150,10 +150,17 @@ Get-Content -LiteralPath $env:KVPN_DEBUG_LOG
 ```
 
 Share the resulting `[kvpn-debug]` lines after reproducing the error. Request
-bodies, cookies, response string/number values, URL queries, and authentication
+bodies, cookie values, response string/number values, URL queries, and authentication
 tokens are omitted. Raw HTTP bodies and full terminal transcripts are not needed.
 Run `Remove-Item Env:\KVPN_DEBUG_LOG` to disable file logging. Logs append as UTF-8
 and use user-only (`0600`) permissions on Linux/macOS.
+
+Diagnostic version 3 adds a `primary-auth` event with `phase: "submitted"` containing
+actual login-form presence, known field names, error-region classifications such as
+`invalid-credentials`, `invalid-request`, or `unknown-error`, and presence-only
+checks for `DSSIGNIN`/`DSID` cookies. Field values and original error text are never
+recorded. `submitted` means the request completed, not that authentication succeeded;
+an empty `errors` list does not establish success either.
 
 ## How it works
 
@@ -189,9 +196,12 @@ and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
   the request fails.
 - **`invalid-access` at `onepassCheck` in the log?** Initialization failed before
   code delivery. Run the installer again to update. Updated logs show
-  `diagnostics_version: 2`, a `POST login.cgi` before `onepassCheck`, and a
+  `diagnostics_version: 3`, a `POST login.cgi` before `onepassCheck`, and a
   `portal-init` event with `phase: "otp-ready"` after the OTP menu is confirmed.
-  If it still fails, collect the new log and the `Error:` message together.
+  If it still fails, collect the new log and the `Error:` message, and check whether
+  the official browser portal reaches OTP on the same PC, account, and realm.
+  This response alone does not prove an incorrect password. The reported rejection
+  with a real account remains unresolved.
 - **Test coverage:** CI uses simulated portal responses to check initialization
   ordering and failure handling, accepted and rejected send requests, and
   Email (`otp_flag=2`)/SMS (`otp_flag=1`) verification.

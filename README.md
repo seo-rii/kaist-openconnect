@@ -147,10 +147,16 @@ Get-Content -LiteralPath $env:KVPN_DEBUG_LOG
 ```
 
 재현이 끝나면 위 명령으로 읽은 `[kvpn-debug]` 줄을 공유하면 됩니다. 요청 본문,
-쿠키, 응답 본문의 문자열값과 숫자값, URL의 쿼리와 인증 토큰은 기록하지 않습니다.
+쿠키값, 응답 본문의 문자열값과 숫자값, URL의 쿼리와 인증 토큰은 기록하지 않습니다.
 원본 HTTP 본문이나 터미널 전체 기록을 공유할 필요가 없습니다. 진단 기록을 끄려면
 `Remove-Item Env:\KVPN_DEBUG_LOG`를 실행하세요. 파일은 UTF-8로 이어쓰기하며
 Linux/macOS에서는 사용자 전용(`0600`) 권한으로 저장합니다.
+
+진단 버전 3의 `primary-auth` / `phase: "submitted"`에는 실제 로그인 폼 여부,
+알려진 입력 필드 이름, 오류 영역의 분류(`invalid-credentials`, `invalid-request`,
+`unknown-error` 등), `DSSIGNIN`·`DSID` 쿠키의 존재 여부만 추가로 기록됩니다.
+필드값과 원문 오류 문구는 기록하지 않습니다. `submitted`는 요청 완료라는 뜻이지
+인증 성공이라는 뜻이 아닙니다. `errors: []`도 성공을 보장하지 않습니다.
 
 ## 동작 원리
 
@@ -187,9 +193,11 @@ Linux/macOS에서는 사용자 전용(`0600`) 권한으로 저장합니다.
   보장하지는 않습니다. 발송 실패 시 표시되는 `Error:` 문구를 확인하세요.
 - **로그에 `onepassCheck`의 `invalid-access`가 보인다면:** 코드 발송 이전의
   초기 인증이 실패한 것입니다. 설치 명령을 다시 실행해 갱신하세요. 새 버전의
-  로그는 `diagnostics_version: 2`이며, `onepassCheck` 전에 `POST login.cgi`가
+  로그는 `diagnostics_version: 3`이며, `onepassCheck` 전에 `POST login.cgi`가
   나타나고 OTP 메뉴 확인 후 `portal-init`의 `phase: "otp-ready"`가 기록됩니다.
-  계속 실패하면 새 로그와 `Error:` 문구를 함께 확인하세요.
+  계속 실패하면 새 로그와 `Error:` 문구, 같은 PC·계정·realm으로 공식 웹 포털에서
+  2차 인증 화면까지 넘어가는지를 함께 확인하세요. 이 응답만으로 비밀번호 오류라고
+  단정할 수 없습니다. 실제 계정에서의 초기 인증 거절 원인은 아직 미확정입니다.
 - **검증 범위:** CI는 모의 포털 응답을 이용해 초기 인증 순서·실패 중단,
   발송 성공·거절 처리와 이메일(`otp_flag=2`)/SMS(`otp_flag=1`) 검증 요청을 검사합니다.
   실제 KAIST 계정의 메일 수신과 VPN 연결은 CI에서 시험하지 않습니다.
