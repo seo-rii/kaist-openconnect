@@ -128,12 +128,29 @@ Linux의 `~/.config/kvpn/config.json`, Windows의
 ./kvpn --forget
 ```
 
-`KVPN_DEBUG=1`을 설정하면 내부 HTTP 리다이렉트 체인을 출력합니다(로그인 흐름이
-바뀌어 뭔가 깨졌을 때 유용합니다):
+`KVPN_DEBUG=1`을 설정하면 초기화·발송·검증 단계의 HTTP 진단 정보를 stderr로
+출력합니다. 상태 코드, 응답 형식과 길이, JSON 구조, 알려진 오류 페이지 징후를
+포함합니다:
 
 ```sh
 KVPN_DEBUG=1 ./kvpn
 ```
+
+Windows PowerShell에서는 `KVPN_DEBUG_LOG`에 파일 경로를 지정하면 입력 프롬프트를
+유지하면서 진단 정보만 파일에 저장할 수 있습니다. 파일 경로만 설정해도 기록이
+활성화됩니다:
+
+```powershell
+$env:KVPN_DEBUG_LOG = Join-Path $env:TEMP ("kvpn-debug-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+kvpn
+Get-Content -LiteralPath $env:KVPN_DEBUG_LOG
+```
+
+재현이 끝나면 위 명령으로 읽은 `[kvpn-debug]` 줄을 공유하면 됩니다. 요청 본문,
+쿠키, 응답 본문의 문자열값과 숫자값, URL의 쿼리와 인증 토큰은 기록하지 않습니다.
+원본 HTTP 본문이나 터미널 전체 기록을 공유할 필요가 없습니다. 진단 기록을 끄려면
+`Remove-Item Env:\KVPN_DEBUG_LOG`를 실행하세요. 파일은 UTF-8로 이어쓰기하며
+Linux/macOS에서는 사용자 전용(`0600`) 권한으로 저장합니다.
 
 ## 동작 원리
 

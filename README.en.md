@@ -132,12 +132,28 @@ To remove everything that was stored:
 ./kvpn --forget
 ```
 
-Set `KVPN_DEBUG=1` to print the internal HTTP redirect chain (useful if the login
-flow changes and something breaks):
+Set `KVPN_DEBUG=1` to print HTTP diagnostics to stderr for initialization, code
+requests, and verification. These include status codes, response type and length,
+JSON structure, and known error-page signals:
 
 ```sh
 KVPN_DEBUG=1 ./kvpn
 ```
+
+In Windows PowerShell, set `KVPN_DEBUG_LOG` to save diagnostics separately while
+keeping interactive prompts usable. Setting the file path alone enables logging:
+
+```powershell
+$env:KVPN_DEBUG_LOG = Join-Path $env:TEMP ("kvpn-debug-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+kvpn
+Get-Content -LiteralPath $env:KVPN_DEBUG_LOG
+```
+
+Share the resulting `[kvpn-debug]` lines after reproducing the error. Request
+bodies, cookies, response string/number values, URL queries, and authentication
+tokens are omitted. Raw HTTP bodies and full terminal transcripts are not needed.
+Run `Remove-Item Env:\KVPN_DEBUG_LOG` to disable file logging. Logs append as UTF-8
+and use user-only (`0600`) permissions on Linux/macOS.
 
 ## How it works
 

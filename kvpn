@@ -62,6 +62,121 @@ class KvpnError(Exception):
 
 
 # --------------------------------------------------------------------------
+# opt-in diagnostics (no request bodies, cookie values, or response text)
+# --------------------------------------------------------------------------
+def debug_log(event, **fields):
+    destination = os.environ.get("KVPN_DEBUG_LOG")
+    if not os.environ.get("KVPN_DEBUG") and not destination:
+        return
+    record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "event": event, **fields}
+    line = "[kvpn-debug] " + json.dumps(record, ensure_ascii=True)
+    if destination:
+        try:
+            fd = os.open(os.path.expanduser(destination),
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as stream:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(stream.fileno(), 0o600)
+                stream.write(line + "\n")
+        except OSError as exc:
+            raise KvpnError("Could not write KVPN_DEBUG_LOG (%s). Choose a writable "
+                            "file in an existing directory." % type(exc).__name__) from None
+    if os.environ.get("KVPN_DEBUG"):
+        print(line, file=sys.stderr, flush=True)
+
+
+def _debug_url(url):
+    """Keep the route for diagnosis, but remove authentication URL material."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        if parts.port:
+            host += ":%s" % parts.port
+        path = re.sub(r";[^/]*", ";[redacted]", parts.path)
+        path = re.sub(r"/url_[^/]+", "/url_[redacted]", path)
+        path = re.sub(r"(/vpn/)[^/]+", r"\1[redacted]", path)
+        return urllib.parse.urlunsplit((parts.scheme, host, path, "", ""))
+    except (TypeError, ValueError):
+        return "[invalid URL]"
+
+
+def _debug_body(body):
+    """Describe unexpected payloads without logging credentials or server text."""
+    summary = {"length": len(body)}
+    if not body.strip():
+        return {**summary, "kind": "empty"}
+    # Bound both parser work and the resulting diagnostic record.
+    sample = body[:131072]
+    try:
+        payload = json.loads(sample)
+    except (ValueError, RecursionError):
+        summary["kind"] = "html" if sample.lstrip().startswith("<") else "text"
+        signals = {
+            "invalid-access": "invalidaccess.js",
+            "session-timeout": "timeout.js",
+            "error-page": "error page",
+            "bad-request": "bad request",
+            "access-denied": "access denied",
+            "forbidden": "forbidden",
+            "login-form": "login.cgi",
+            "otp-menu": "mainmenu.js",
+            "javascript-redirect": "location.href",
+        }
+        lowered = sample.lower()
+        summary["signals"] = [name for name, marker in signals.items() if marker in lowered]
+        return summary
+
+    remaining = 40
+
+    def shape(value, depth=0):
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0 or depth > 3:
+            return {"type": "omitted"}
+        if isinstance(value, dict):
+            fields = {}
+            for key, child in list(value.items())[:20]:
+                if remaining <= 0:
+                    break
+                # API field names are useful; arbitrary keys may contain user data.
+                label = key if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,47}", key) else "[redacted key]"
+                fields[label] = shape(child, depth + 1)
+            return {"type": "object", "fields": fields, "field_count": len(value)}
+        if isinstance(value, list):
+            return {"type": "array", "length": len(value),
+                    "items": [shape(child, depth + 1) for child in value[:3]]}
+        if isinstance(value, str):
+            result = {"type": "string", "length": len(value)}
+            if value in ("true", "false"):
+                result["boolean_text"] = value
+            elif depth < 3 and value.lstrip().startswith(("{", "[")):
+                try:
+                    result["embedded_json"] = shape(json.loads(value), depth + 1)
+                except (ValueError, RecursionError):
+                    pass
+            return result
+        if value is None:
+            return {"type": "null"}
+        if isinstance(value, bool):
+            return {"type": "boolean", "value": value}
+        return {"type": "number"}
+
+    return {**summary, "kind": "json", "shape": shape(payload)}
+
+
+def debug_response(stage, method, request_url, response_url, status, headers, body):
+    if not os.environ.get("KVPN_DEBUG") and not os.environ.get("KVPN_DEBUG_LOG"):
+        return
+    debug_log("http", stage=stage, method=method, url=_debug_url(request_url),
+              final_url=_debug_url(response_url), status=status,
+              content_type=headers.get("Content-Type", "").split(";", 1)[0][:80],
+              content_encoding=headers.get("Content-Encoding", "")[:40],
+              location=_debug_url(headers.get("Location", "")),
+              body=_debug_body(body))
+
+
+# --------------------------------------------------------------------------
 # HTTP plumbing
 # --------------------------------------------------------------------------
 def new_session():
@@ -80,7 +195,9 @@ def http_get(opener, url, referer=None):
     if referer:
         req.add_header("Referer", referer)
     with opener.open(req, timeout=30) as r:
-        return r.geturl(), r.read().decode("utf-8", "replace")
+        body = r.read().decode("utf-8", "replace")
+        debug_response("get", "GET", url, r.geturl(), r.getcode(), r.headers, body)
+        return r.geturl(), body
 
 
 def http_post(opener, url, data, referer=None):
@@ -90,7 +207,9 @@ def http_post(opener, url, data, referer=None):
     if referer:
         req.add_header("Referer", referer)
     with opener.open(req, timeout=30) as r:
-        return r.geturl(), r.read().decode("utf-8", "replace")
+        body = r.read().decode("utf-8", "replace")
+        debug_response("post", "POST", url, r.geturl(), r.getcode(), r.headers, body)
+        return r.geturl(), body
 
 
 def cookie_value(cj, name):
@@ -170,8 +289,7 @@ class Ivanti:
         if btn is None:
             btn = ("btnContinue", "Continue the session")
         data[btn[0]] = btn[1]
-        if os.environ.get("KVPN_DEBUG"):
-            print("  [confirm] posting %s to login.cgi" % sorted(data))
+        debug_log("confirm-session")
         return http_post(self.opener, self.login_url, data, referer=page_url)
 
 
@@ -204,7 +322,9 @@ class Portal:
         for name, value in (headers or {}).items():
             req.add_header(name, value)
         with self.raw.open(req, timeout=30) as r:
-            return r.getcode(), r.headers, r.read().decode("utf-8", "replace")
+            body = r.read().decode("utf-8", "replace")
+            debug_response("portal", method, url, r.geturl(), r.getcode(), r.headers, body)
+            return r.getcode(), r.headers, body
 
     def begin(self, username):
         """Steps 2-3: mint the portal session and set the OTP context."""
@@ -244,6 +364,7 @@ class Portal:
         """Step 4: request a code and require the portal's acknowledgement."""
         if send_type not in OTP_FLAGS:
             raise KvpnError("Unsupported code delivery method: %s" % send_type)
+        debug_log("send-code", method=send_type)
         # Match twoAuth_send() in the portal's /js/mainMenu.js. This is a
         # same-origin AJAX call from the portal, not an Ivanti form submission.
         # Do not follow redirects: an expired-session page is not acceptance.
@@ -260,6 +381,7 @@ class Portal:
                 "Sec-Fetch-Mode": "cors",
             })
         except (urllib.error.URLError, OSError) as exc:
+            debug_log("send-code-error", method=send_type, error=type(exc).__name__)
             raise KvpnError("Could not confirm the %s code request (%s). "
                             "Check your connection to the VPN portal before retrying."
                             % (send_type.upper(), type(exc).__name__)) from None
@@ -274,7 +396,9 @@ class Portal:
         if not isinstance(result, dict) or "success" not in result:
             raise KvpnError("The portal returned an unexpected response to the %s "
                             "code request. Delivery is not confirmed; restart kvpn "
-                            "or check the official VPN portal." % send_type.upper())
+                            "or check the official VPN portal. Set KVPN_DEBUG_LOG "
+                            "to a file path to collect response diagnostics."
+                            % send_type.upper())
         success = result["success"]
         if success is True or success == "true":
             return
@@ -300,7 +424,6 @@ class Portal:
         """Steps 5-6: verify the code, walk the OAuth chain by hand, return password#2."""
         if send_type not in OTP_FLAGS:
             raise KvpnError("Unsupported code delivery method: %s" % send_type)
-        debug = os.environ.get("KVPN_DEBUG")
         mainmenu = PORTAL + "/view/mainMenu"
 
         status, hdrs, _ = self._raw("POST", PORTAL + "/j_spring_security_check.do", {
@@ -308,8 +431,6 @@ class Portal:
             "j_password": otp,
             "otp_flag": OTP_FLAGS[send_type],
         }, referer=mainmenu)
-        if debug:
-            print("  [verify] j_spring -> %s %s" % (status, hdrs.get("Location", "")[:90]))
         if status not in (301, 302, 303, 307, 308):
             raise KvpnError("Code verification failed (wrong or expired code).")
 
@@ -318,9 +439,6 @@ class Portal:
         body = ""
         for _ in range(6):
             status, hdrs, body = self._raw("GET", loc, referer=mainmenu)
-            if debug:
-                print("  [verify] hop %s %-70s -> %s" % (status, loc[:70],
-                                                         hdrs.get("Location", "")[:60]))
             if status in (301, 302, 303, 307, 308):
                 loc = urllib.parse.urljoin(loc, hdrs.get("Location"))
                 continue
@@ -699,6 +817,9 @@ def main(argv):
     if argv:
         raise KvpnError("Unknown option: %s\n%s" % (" ".join(argv), USAGE))
 
+    debug_log("runtime", platform=sys.platform,
+              python=".".join(str(part) for part in sys.version_info[:3]),
+              diagnostics_version=1)
     print("=== KAIST VPN (kvpn) ===")
     stored = load_credentials()
     if stored:
